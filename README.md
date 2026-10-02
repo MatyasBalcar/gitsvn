@@ -14,7 +14,7 @@ Local commits are snapshots of your uncommitted SVN changes. Publishing changes 
 
 ### Choose the folders
 
-The program can live on any drive, for example `C:\Tools\gitsvn`. Keep `main.py`, `gitsvn.cmd`, and `install.ps1` together. Choose a writable folder, or specify a separate writable state folder with `--state-dir`.
+The program can live on any drive, for example `C:\Tools\gitsvn`. Keep `main.py`, `gitsvn.cmd`, and `install.ps1` together. Choose a writable folder, or configure a separate writable state folder.
 
 Patch storage defaults to **`D:\Patches`**. Your PC needs a `D:` drive to use that default. The first save creates the folder and its branch subfolders automatically; you can also create it yourself:
 
@@ -22,9 +22,9 @@ Patch storage defaults to **`D:\Patches`**. Your PC needs a `D:` drive to use th
 New-Item -ItemType Directory -Force -Path D:\Patches
 ```
 
-The program does not have to live inside the patch folder. If you do not have a `D:` drive, or prefer another location, pass `--patch-root C:\Patches`.
+The program does not have to live inside the patch folder. If you do not have a `D:` drive, or prefer another location, set `patch_root` to that location in the configuration below.
 
-Both patch storage and local state must be **outside the SVN working copy**. By default, state and configuration live in `.gitsvn` beside `main.py`. If you keep the program inside an SVN checkout, select an external state folder with `--state-dir`.
+Both patch storage and local state must be **outside the SVN working copy**. By default, state and configuration live in `.gitsvn` beside `main.py`. If you keep the program inside an SVN checkout, configure an external `state_dir`.
 
 ### Make the command available everywhere
 
@@ -38,37 +38,40 @@ Open a new terminal afterward. The installer adds the program's actual location 
 
 ### Select your working copy
 
-Use `--svn-root` to point at the SVN working-copy root, the directory containing `.svn`. Supply your own path explicitly rather than relying on the default from the original installation.
+Create or edit `.gitsvn\config.json` beside `main.py` once. Set `svn_root` to the SVN working-copy root, the directory containing `.svn`, and choose your patch and state folders:
 
-For example, these PowerShell options select a checkout and a separate state folder:
-
-```powershell
-$gitsvnOptions = @(
-    '--svn-root', 'D:\Source\ExampleProject',
-    '--patch-root', 'D:\Patches',
-    '--state-dir', 'C:\Work\gitsvn-state'
-)
-
-gitsvn @gitsvnOptions status
+```json
+{
+  "svn_root": "D:\\Source\\ExampleProject",
+  "patch_root": "D:\\Patches",
+  "state_dir": "C:\\Work\\gitsvn-state",
+  "autosave": true
+}
 ```
 
-Options go **before the command** and must be supplied on each invocation. Use a separate state folder for each working copy; state records the selected checkout and patch root and refuses mismatched paths.
+Windows paths in JSON use doubled backslashes. Then run plain commands from any directory:
+
+```powershell
+gitsvn status
+```
+
+The configuration is found beside the program, regardless of your current directory. Use a separate state folder for each working copy and patch root; state records those paths and refuses mismatches. See [Configuration](#configuration) for optional command-line overrides.
 
 ## Everyday workflow
 
-Using the options above:
+After configuring your folders:
 
 ```powershell
-gitsvn @gitsvnOptions branch 12345
-gitsvn @gitsvnOptions switch 12345
+gitsvn branch 12345
+gitsvn switch 12345
 
 # Edit files in the SVN working copy. Add new files before saving them.
-gitsvn @gitsvnOptions add src\Example.cs
-gitsvn @gitsvnOptions commit -m "Fix input validation"
+gitsvn add src\Example.cs
+gitsvn commit -m "Fix input validation"
 
-gitsvn @gitsvnOptions log
-gitsvn @gitsvnOptions finalize FixInputValidation
-gitsvn @gitsvnOptions switch trunk
+gitsvn log
+gitsvn finalize FixInputValidation
+gitsvn switch trunk
 ```
 
 Creating a branch saves an empty initial snapshot of SVN BASE and leaves your current edits in place. `switch` restores that branch's saved version. Each commit contains the complete diff against SVN BASE, so restoring a version applies one snapshot rather than a sequence of commits.
@@ -93,11 +96,11 @@ Use `gitsvn [options] <command>`:
 Examples:
 
 ```powershell
-gitsvn @gitsvnOptions revert 12345
-gitsvn @gitsvnOptions revert 12345 20261002_143000_123456
-gitsvn @gitsvnOptions finalize "Fix input validation" 12345
-gitsvn @gitsvnOptions finalize SavedVersion 12345 --latest
-gitsvn @gitsvnOptions pull
+gitsvn revert 12345
+gitsvn revert 12345 20261002_143000_123456
+gitsvn finalize "Fix input validation" 12345
+gitsvn finalize SavedVersion 12345 --latest
+gitsvn pull
 ```
 
 Use the exact snapshot name shown by `log`. Restoring an older version makes it the branch's saved head for future switches.
@@ -108,15 +111,26 @@ Descriptions must start with a letter or number and use letters, numbers, spaces
 
 ## Configuration
 
-Edit `config.json` in the selected state folder. With the default state location, this is `.gitsvn\config.json` beside `main.py`.
+The default configuration is `.gitsvn\config.json` beside `main.py`. All settings are optional:
 
-```json
-{
-  "autosave": true
-}
+| Setting | Meaning |
+| --- | --- |
+| `svn_root` | SVN working-copy root. Configure this for your checkout. |
+| `patch_root` | Folder for branch snapshots and finalized patches; defaults to `D:\Patches`. |
+| `state_dir` | Folder for local branch state; defaults to the configuration file's directory. |
+| `autosave` | Save outgoing changes when switching branches; defaults to `true`. |
+
+Setting `state_dir` changes where state is stored; the configuration continues to load from the same file. Relative paths in the configuration are resolved from that file's directory. Relative command-line paths are resolved from your current directory.
+
+Command-line options override the corresponding configuration settings and go **before the command**. For example, a different configuration can select another working copy without changing your usual setup:
+
+```powershell
+gitsvn --config C:\Work\another-project.json status
 ```
 
-`autosave` defaults to `true` when the file or setting is missing. Existing configuration takes precedence.
+Without `--config`, an explicit `--state-dir PATH` loads `PATH\config.json` for compatibility with existing setups. When both are supplied, `--config` selects the file and `--state-dir` overrides where state is stored. `--svn-root` and `--patch-root` are also available as overrides. Missing files or settings keep the existing defaults.
+
+`autosave` controls branch switching:
 
 - **`true`:** switching saves outgoing changes as a commit before restoring the destination branch.
 - **`false`:** switching creates no outgoing commit. Commit work you want to keep first; returning to the branch restores its saved head.

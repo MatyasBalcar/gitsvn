@@ -38,24 +38,34 @@ class Snapshot:
 
 
 class GitSvn:
-    def __init__(self, svn_root, patch_root, state_dir):
-        self.svn_root = Path(svn_root).resolve()
-        self.patch_root = Path(patch_root).resolve()
-        self.state_dir = Path(state_dir).resolve()
-        if self.patch_root.is_relative_to(self.svn_root):
-            raise GitSvnError("Patch storage must be outside the SVN working copy.")
-        if self.state_dir.is_relative_to(self.svn_root):
-            raise GitSvnError("State storage must be outside the SVN working copy.")
-        self.config_path = self.state_dir / "config.json"
+    def __init__(self, svn_root=None, patch_root=None, state_dir=None, config_path=None):
+        default_state_dir = Path(__file__).resolve().parent / ".gitsvn"
+        if config_path is not None:
+            self.config_path = Path(config_path).resolve()
+            if not self.config_path.is_file():
+                raise GitSvnError(f"Config file does not exist: {self.config_path}")
+        else:
+            config_dir = Path(state_dir).resolve() if state_dir is not None else default_state_dir
+            self.config_path = config_dir / "config.json"
         self.config = {"autosave": True}
         if self.config_path.exists():
             try:
                 config = json.loads(self.config_path.read_text(encoding="utf-8-sig"))
                 if not isinstance(config, dict) or not isinstance(config.get("autosave", True), bool):
                     raise ValueError("autosave must be true or false")
+                for key in ("svn_root", "patch_root", "state_dir"):
+                    if key in config and (not isinstance(config[key], str) or not config[key].strip()):
+                        raise ValueError(f"{key} must be a nonempty path string")
                 self.config.update(config)
             except (ValueError, TypeError) as error:
                 raise GitSvnError(f"Invalid config file: {self.config_path}: {error}") from error
+        self.svn_root = self.configured_path(svn_root, "svn_root", Path(r"D:\Elektlabs"))
+        self.patch_root = self.configured_path(patch_root, "patch_root", Path(r"D:\Patches"))
+        self.state_dir = self.configured_path(state_dir, "state_dir", self.config_path.parent)
+        if self.patch_root.is_relative_to(self.svn_root):
+            raise GitSvnError("Patch storage must be outside the SVN working copy.")
+        if self.state_dir.is_relative_to(self.svn_root):
+            raise GitSvnError("State storage must be outside the SVN working copy.")
         self.state_path = self.state_dir / "state.json"
         self.state = {
             "version": 1,
@@ -80,6 +90,16 @@ class GitSvn:
                     raise ValueError("invalid branch heads")
             except (ValueError, KeyError, TypeError) as error:
                 raise GitSvnError(f"Invalid state file: {self.state_path}: {error}") from error
+
+    def configured_path(self, value, key, default):
+        if value is not None:
+            return Path(value).resolve()
+        if key not in self.config:
+            return Path(default).resolve()
+        path = Path(self.config[key])
+        if not path.is_absolute():
+            path = self.config_path.parent / path
+        return path.resolve()
 
     @property
     def branch(self):
@@ -616,9 +636,10 @@ class GitSvn:
 
 def parser():
     result = argparse.ArgumentParser(prog="gitsvn", description="Local Git-like patch branches for SVN.")
-    result.add_argument("--svn-root", default=r"D:\Elektlabs")
-    result.add_argument("--patch-root", default=r"D:\Patches")
-    result.add_argument("--state-dir", default=str(Path(__file__).resolve().parent / ".gitsvn"))
+    result.add_argument("--config", help="Settings file; defaults to .gitsvn/config.json beside the program")
+    result.add_argument("--svn-root", help="SVN working-copy root; overrides config")
+    result.add_argument("--patch-root", help="Patch storage folder; overrides config")
+    result.add_argument("--state-dir", help="State folder; also selects config unless --config is supplied")
     commands = result.add_subparsers(dest="command", required=True)
     branch = commands.add_parser("branch", help="List branches or initialize a clean-trunk branch")
     branch.add_argument("name", nargs="?")
@@ -645,7 +666,7 @@ def parser():
 def main(argv=None):
     arguments = parser().parse_args(argv)
     try:
-        app = GitSvn(arguments.svn_root, arguments.patch_root, arguments.state_dir)
+        app = GitSvn(arguments.svn_root, arguments.patch_root, arguments.state_dir, arguments.config)
         if (arguments.command in ("switch", "commit", "revert", "pull", "status", "add") or
                 (arguments.command == "finalize" and not arguments.latest)):
             app.verify_working_copy()

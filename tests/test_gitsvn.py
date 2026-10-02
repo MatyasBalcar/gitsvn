@@ -67,6 +67,11 @@ class GitSvnIntegrationTests(unittest.TestCase):
             *args,
         ], input=input, success=success)
 
+    def configured_cli(self, config_path, *args, cwd=None, success=True):
+        return self.run_process([
+            sys.executable, str(MAIN), "--config", str(config_path), *args,
+        ], cwd=cwd, success=success)
+
     def svn(self, *args, success=True):
         return self.run_process(["svn", *args], cwd=self.wc, success=success)
 
@@ -168,6 +173,210 @@ class GitSvnIntegrationTests(unittest.TestCase):
                             for path in self.snapshots("trunk")))
         self.cli("switch", "trunk")
         self.assertEqual(self.read("story.txt"), "default autosaved trunk work\n")
+
+    def test_config_paths_support_commands_from_outside_working_copy(self):
+        self.configure(svn_root=str(self.wc), patch_root=str(self.patches),
+                       state_dir=".", autosave=False)
+        config_path = self.state / "config.json"
+        self.configured_cli(config_path, "branch", "trunk")
+        self.configured_cli(config_path, "branch", "18814")
+        self.configured_cli(config_path, "switch", "18814")
+        relative = "nested/configured.txt"
+        self.write(relative, "configured working copy addition\n")
+        self.configured_cli(config_path, "add", "nested")
+        self.configured_cli(config_path, "commit", "-m", "Configured paths")
+        saved = self.snapshots("18814")[-1]
+        self.assertIn(f"Index: {relative}\n", saved.read_text(encoding="utf-8"))
+        self.configured_cli(config_path, "finalize", "Configured export")
+        name = datetime.now().strftime("%Y_%m_%d") + "_Configured_export_BalcarM.patch"
+        self.assertEqual((self.patches / name).read_bytes(),
+                         self.snapshots("18814")[-1].read_bytes())
+        history_before = self.tree_contents(self.patches)
+        self.configured_cli(config_path, "switch", "trunk")
+        self.assertFalse((self.wc / relative).exists())
+        self.configured_cli(config_path, "switch", "18814")
+        self.assertEqual(self.read(relative), "configured working copy addition\n")
+        self.assertEqual(self.tree_contents(self.patches), history_before)
+        self.assertEqual(json.loads((self.state / "state.json").read_text(encoding="utf-8"))
+                         ["branch"], "18814")
+
+    def test_config_relative_paths_resolve_from_config_directory(self):
+        config_dir = self.root / "settings"
+        config_dir.mkdir()
+        config_path = config_dir / "config.json"
+        config_path.write_text(json.dumps({
+            "svn_root": "../wc", "patch_root": "../patches", "state_dir": "saved-state",
+        }), encoding="utf-8")
+        elsewhere = self.root / "elsewhere"
+        elsewhere.mkdir()
+
+        self.configured_cli(config_path, "branch", "18814", cwd=elsewhere)
+
+        self.assertEqual(len(self.snapshots("18814")), 1)
+        state_path = config_dir / "saved-state" / "state.json"
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        self.assertEqual(Path(state["svn_root"]), self.wc)
+        self.assertEqual(Path(state["patch_root"]), self.patches)
+        self.assertFalse((elsewhere / "saved-state").exists())
+        self.assertFalse(self.state.exists())
+
+    def test_config_defaults_state_to_selected_config_directory(self):
+        self.configure(svn_root=str(self.wc), patch_root=str(self.patches))
+        config_path = self.state / "config.json"
+
+        self.configured_cli(config_path, "branch", "18814")
+
+        self.assertTrue((self.state / "state.json").is_file())
+        self.assertEqual(len(self.snapshots("18814")), 1)
+
+    def test_state_dir_discovers_config_and_overrides_configured_state_dir(self):
+        other_state = self.root / "other-state"
+        self.configure(svn_root=str(self.wc), patch_root=str(self.patches),
+                       state_dir=str(other_state))
+
+        self.run_process([sys.executable, str(MAIN), "--state-dir", str(self.state),
+                          "branch", "18814"])
+
+        self.assertTrue((self.state / "state.json").is_file())
+        self.assertFalse(other_state.exists())
+        self.assertEqual(len(self.snapshots("18814")), 1)
+
+    def test_default_config_is_loaded_from_program_directory(self):
+        program_dir = self.root / "program"
+        config_dir = program_dir / ".gitsvn"
+        config_dir.mkdir(parents=True)
+        config_path = config_dir / "config.json"
+        config_path.write_text(json.dumps({
+            "svn_root": str(self.wc), "patch_root": str(self.patches),
+            "state_dir": ".", "autosave": False,
+        }), encoding="utf-8")
+
+        with patch("main.__file__", str(program_dir / "main.py")):
+            app = GitSvn()
+            app.verify_working_copy()
+            app.create_branch("18814")
+
+        self.assertEqual(app.config_path, config_path)
+        self.assertEqual(app.state_dir, config_dir)
+        self.assertFalse(app.config["autosave"])
+        self.assertEqual(len(self.snapshots("18814")), 1)
+        self.assertTrue((config_dir / "state.json").is_file())
+
+    def test_cli_paths_override_config_and_remain_relative_to_command_directory(self):
+        self.configure(svn_root=str(self.wc), patch_root=str(self.patches),
+                       state_dir=".")
+        config_path = self.state / "config.json"
+        self.configured_cli(config_path, "branch", "18814")
+        state_before = self.tree_contents(self.state)
+        patches_before = self.tree_contents(self.patches)
+        alternate_wc = self.root / "alternate-wc"
+        self.run_process(["svn", "checkout", self.repo_url, str(alternate_wc)])
+        elsewhere = self.root / "elsewhere"
+        elsewhere.mkdir()
+        alternate_state_dir = self.root / "alternate-state"
+        alternate_state_dir.mkdir()
+        (alternate_state_dir / "config.json").write_text("{", encoding="utf-8")
+
+        self.configured_cli(config_path, "--svn-root", "../alternate-wc",
+                            "--patch-root", "../alternate-patches",
+                            "--state-dir", "../alternate-state",
+                            "branch", "19999", cwd=elsewhere)
+
+        alternate_state = json.loads((self.root / "alternate-state" / "state.json")
+                                     .read_text(encoding="utf-8"))
+        self.assertEqual(Path(alternate_state["svn_root"]), alternate_wc)
+        self.assertEqual(Path(alternate_state["patch_root"]), self.root / "alternate-patches")
+        self.assertEqual(len(list((self.root / "alternate-patches" / "19999")
+                                 .glob("*.patch"))), 1)
+        self.assertEqual(self.tree_contents(self.state), state_before)
+        self.assertEqual(self.tree_contents(self.patches), patches_before)
+
+    def test_config_workspace_change_requires_separate_state_directory(self):
+        self.configure(svn_root=str(self.wc), patch_root=str(self.patches))
+        config_path = self.state / "config.json"
+        self.configured_cli(config_path, "branch", "18814")
+        state_before = self.tree_contents(self.state)
+        patches_before = self.tree_contents(self.patches)
+        alternate_patches = self.root / "alternate-patches"
+
+        result = self.configured_cli(config_path, "--patch-root", str(alternate_patches),
+                                     "branch", "19999", success=False)
+
+        self.assertIn("separate --state-dir", result.stderr)
+        self.assertEqual(self.tree_contents(self.state), state_before)
+        self.assertEqual(self.tree_contents(self.patches), patches_before)
+        self.assertFalse(alternate_patches.exists())
+
+    def test_invalid_config_paths_are_rejected_before_mutation(self):
+        self.new_branch()
+        self.write("story.txt", "keep edits when configured paths are invalid\n")
+        config_path = self.root / "config.json"
+        settings = {"svn_root": str(self.wc), "patch_root": str(self.patches),
+                    "state_dir": str(self.state)}
+        status_before = ET.canonicalize(self.svn("status", "--xml").stdout)
+        patches_before = self.tree_contents(self.patches)
+        state_before = self.tree_contents(self.state)
+        for key in ("svn_root", "patch_root", "state_dir"):
+            for value in ("", "   ", None, 0, []):
+                with self.subTest(key=key, value=value):
+                    config_path.write_text(json.dumps({**settings, key: value}),
+                                           encoding="utf-8")
+                    config_before = config_path.read_bytes()
+
+                    result = self.configured_cli(config_path, "switch", "trunk", success=False)
+
+                    self.assertIn("config", result.stderr.lower())
+                    self.assertEqual(config_path.read_bytes(), config_before)
+                    self.assertEqual(self.tree_contents(self.patches), patches_before)
+                    self.assertEqual(self.tree_contents(self.state), state_before)
+                    self.assertEqual(ET.canonicalize(self.svn("status", "--xml").stdout),
+                                     status_before)
+                    self.assertEqual(self.read("story.txt"),
+                                     "keep edits when configured paths are invalid\n")
+
+    def test_config_storage_inside_working_copy_is_rejected(self):
+        config_path = self.root / "config.json"
+        settings = {"svn_root": str(self.wc), "patch_root": str(self.patches),
+                    "state_dir": str(self.state)}
+        for key in ("patch_root", "state_dir"):
+            with self.subTest(key=key):
+                forbidden = self.wc / key
+                config_path.write_text(json.dumps({**settings, key: str(forbidden)}),
+                                       encoding="utf-8")
+
+                result = self.configured_cli(config_path, "branch", "18814", success=False)
+
+                self.assertIn("outside the SVN working copy", result.stderr)
+                self.assertFalse(forbidden.exists())
+                self.assertFalse(self.patches.exists())
+                self.assertFalse(self.state.exists())
+
+    def test_help_is_available_with_invalid_config(self):
+        config_path = self.root / "invalid-config.json"
+        config_path.write_text("{", encoding="utf-8")
+
+        result = self.configured_cli(config_path, "--help")
+
+        self.assertIn("--config", result.stdout)
+        self.assertIn("--svn-root", result.stdout)
+        self.assertFalse(self.patches.exists())
+        self.assertFalse(self.state.exists())
+
+    def test_explicit_missing_config_is_rejected_before_mutation(self):
+        config_path = self.root / "missing-config.json"
+        working_copy_before = self.tree_contents(self.wc)
+
+        result = self.configured_cli(config_path, "--svn-root", str(self.wc),
+                                     "--patch-root", str(self.patches),
+                                     "--state-dir", str(self.state),
+                                     "branch", "18814", success=False)
+
+        self.assertIn("config", result.stderr.lower())
+        self.assertIn(str(config_path), result.stderr)
+        self.assertEqual(self.tree_contents(self.wc), working_copy_before)
+        self.assertFalse(config_path.exists())
+        self.assertFalse(self.patches.exists())
+        self.assertFalse(self.state.exists())
 
     def test_switch_autosave_false_preserves_history_and_saved_head(self):
         self.configure(autosave=False)
