@@ -1,25 +1,114 @@
 # gitsvn
 
-A local, Git-like workflow for an SVN working copy. Requires Python 3.12 or newer and `svn` on PATH. Commands save patches; they do not commit to SVN or create branches on the SVN server.
+A local, Git-like workflow for an SVN working copy. Save changes as patches, organize them into local branches, switch between saved versions, and export a final patch for a ticket.
 
-Register the launcher in your user PATH once, then open a new terminal to run `gitsvn` from any directory:
+Local commits are snapshots of your uncommitted SVN changes. Publishing changes to the SVN server remains a separate step using your usual SVN client.
+
+## Setup
+
+### Requirements
+
+- Windows with Python 3.12 or newer.
+- `python` and `svn` available on PATH.
+- An existing SVN working copy.
+
+### Choose the folders
+
+The program can live on any drive, for example `C:\Tools\gitsvn`. Keep `main.py`, `gitsvn.cmd`, and `install.ps1` together. Choose a writable folder, or specify a separate writable state folder with `--state-dir`.
+
+Patch storage defaults to **`D:\Patches`**. Your PC needs a `D:` drive to use that default. The first save creates the folder and its branch subfolders automatically; you can also create it yourself:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File D:\Patches\GitSVN\install.ps1
+New-Item -ItemType Directory -Force -Path D:\Patches
 ```
 
-The installer preserves existing PATH entries and does not add duplicates. You can also run `D:\Patches\GitSVN\gitsvn.cmd` directly.
+The program does not have to live inside the patch folder. If you do not have a `D:` drive, or prefer another location, pass `--patch-root C:\Patches`.
 
-Defaults:
+Both patch storage and local state must be **outside the SVN working copy**. By default, state and configuration live in `.gitsvn` beside `main.py`. If you keep the program inside an SVN checkout, select an external state folder with `--state-dir`.
 
-- SVN working copy: `D:\Elektlabs`
-- Patch folders: `D:\Patches\<branch>`
-- Local state: `.gitsvn` beside `main.py`
-- Initial branch: `trunk`
+### Make the command available everywhere
+
+From the folder containing the program, run:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1
+```
+
+Open a new terminal afterward. The installer adds the program's actual location to your user PATH, so `gitsvn` works from any directory. If you move the program later, update its PATH entry. You can also run `gitsvn.cmd` directly by its full path.
+
+### Select your working copy
+
+Use `--svn-root` to point at the SVN working-copy root, the directory containing `.svn`. Supply your own path explicitly rather than relying on the default from the original installation.
+
+For example, these PowerShell options select a checkout and a separate state folder:
+
+```powershell
+$gitsvnOptions = @(
+    '--svn-root', 'D:\Source\ExampleProject',
+    '--patch-root', 'D:\Patches',
+    '--state-dir', 'C:\Work\gitsvn-state'
+)
+
+gitsvn @gitsvnOptions status
+```
+
+Options go **before the command** and must be supplied on each invocation. Use a separate state folder for each working copy; state records the selected checkout and patch root and refuses mismatched paths.
+
+## Everyday workflow
+
+Using the options above:
+
+```powershell
+gitsvn @gitsvnOptions branch 12345
+gitsvn @gitsvnOptions switch 12345
+
+# Edit files in the SVN working copy. Add new files before saving them.
+gitsvn @gitsvnOptions add src\Example.cs
+gitsvn @gitsvnOptions commit -m "Fix input validation"
+
+gitsvn @gitsvnOptions log
+gitsvn @gitsvnOptions finalize FixInputValidation
+gitsvn @gitsvnOptions switch trunk
+```
+
+Creating a branch saves an empty initial snapshot of SVN BASE and leaves your current edits in place. `switch` restores that branch's saved version. Each commit contains the complete diff against SVN BASE, so restoring a version applies one snapshot rather than a sequence of commits.
+
+## Commands
+
+Use `gitsvn [options] <command>`:
+
+| Command | What it does |
+| --- | --- |
+| `branch` | List local branches; `*` marks the current branch. |
+| `branch NAME` | Create or locate a branch folder and initialize it when needed. |
+| `switch NAME` | Restore the branch's saved head, optionally saving outgoing changes according to `autosave`. |
+| `status` | Show the current branch and SVN status. |
+| `add PATH...` | Schedule new files or folders with SVN. Paths are relative to the working-copy root. |
+| `commit -m MESSAGE` | Save a timestamped patch, message, and snapshot metadata in the current branch folder. |
+| `log [BRANCH]` | List saved versions and their messages. Defaults to the current branch. |
+| `revert [BRANCH] [SNAPSHOT]` | Restore a saved version and select its branch. Without a snapshot name, show a numbered picker; enter `q` to cancel. |
+| `finalize DESCRIPTION [TICKET]` | Save a normal commit in the ticket folder and export a named patch directly into the patch root. The ticket defaults to the current branch. |
+| `pull` | Save pending changes for recovery, then run SVN update at the working-copy root, excluding externals. |
+
+Examples:
+
+```powershell
+gitsvn @gitsvnOptions revert 12345
+gitsvn @gitsvnOptions revert 12345 20261002_143000_123456
+gitsvn @gitsvnOptions finalize "Fix input validation" 12345
+gitsvn @gitsvnOptions finalize SavedVersion 12345 --latest
+gitsvn @gitsvnOptions pull
+```
+
+Use the exact snapshot name shown by `log`. Restoring an older version makes it the branch's saved head for future switches.
+
+`finalize` normally captures current changes. With `--latest`, it uses the current branch's saved head, or the newest saved patch when no head is recorded. An explicit ticket selects the destination folder and keeps the current branch selected. Finalizing updates the destination's saved head.
+
+Descriptions must start with a letter or number and use letters, numbers, spaces, dots, underscores, or hyphens. Spaces become underscores in the export filename. Existing finalized patches are never overwritten; choose another description for another export on the same day.
 
 ## Configuration
 
-Settings live in `.gitsvn/config.json` beside `main.py`, or in the directory selected by `--state-dir`:
+Edit `config.json` in the selected state folder. With the default state location, this is `.gitsvn\config.json` beside `main.py`.
 
 ```json
 {
@@ -27,61 +116,49 @@ Settings live in `.gitsvn/config.json` beside `main.py`, or in the directory sel
 }
 ```
 
-`autosave` defaults to `true` when the file or setting is missing. Set it to `false` to stop `switch` from creating outgoing commits. Commit changes you want to keep before switching; returning to that branch restores its saved head. A failed switch still restores your outgoing changes using a temporary recovery copy, which creates no history entries. Explicit `revert` and `pull` continue to save recovery snapshots.
+`autosave` defaults to `true` when the file or setting is missing. Existing configuration takes precedence.
 
-## Example
+- **`true`:** switching saves outgoing changes as a commit before restoring the destination branch.
+- **`false`:** switching creates no outgoing commit. Commit work you want to keep first; returning to the branch restores its saved head.
 
-```bat
-gitsvn branch 18814
-gitsvn switch 18814
-gitsvn add kingspan\path\new-file.cs
-gitsvn commit -m "Fix ticket 18814"
-gitsvn finalize FixSviewPriority
-gitsvn log 18814
-gitsvn switch trunk
-gitsvn revert 18814
-gitsvn pull
+A failed switch restores outgoing changes from a recovery copy. With autosave disabled, that copy is temporary and adds no history entries. If rollback cannot finish, the recovery files remain and the error reports their location. Explicit `revert` and `pull` continue to save recovery snapshots regardless of this setting.
+
+## Saved files
+
+With the default patch root, files are organized as follows:
+
+```text
+D:\Patches\
+    12345\
+        20261002_143000_123456.patch
+        20261002_143000_123456.txt
+        20261002_143000_123456.json
+    YYYY_MM_DD_FixInputValidation_<author-suffix>.patch
 ```
 
-## Commands
+Keep the branch's `.patch`, `.txt`, and `.json` files together. Metadata preserves details such as empty files, directories, and empty-file properties. Existing patches without matching message files can also be listed and restored.
 
-| Command | Behavior |
-| --- | --- |
-| `branch` | List local branches. |
-| `branch NAME` | Create the branch folder and initialize a clean-trunk snapshot when needed. Does not switch branches. |
-| `switch NAME` | Restore the selected branch's saved head, saving outgoing changes when `autosave` is true. For an existing folder without local state, use its newest patch. |
-| `commit -m MESSAGE` | Save the current branch's complete SVN BASE diff as a timestamped `.patch` and matching `.txt` message. |
-| `finalize DESCRIPTION [TICKET]` | Save a normal timestamped commit under the ticket folder and export only `YYYY_MM_DD_DESCRIPTION_BalcarM.patch` directly under the patch root. The ticket defaults to the current branch. Add `--latest` to use the branch's saved snapshot instead of current changes. |
-| `log [BRANCH]` | List snapshot timestamps and messages for the selected or current branch. |
-| `revert [BRANCH] [SNAPSHOT]` | Save current changes automatically, then restore a snapshot and select its branch. Without a snapshot, show an interactive timestamp/message picker. |
-| `pull` | Run `svn update` in the SVN working copy. |
-| `status` | Show the current local branch and SVN working-copy status. |
-| `add PATH...` | Run `svn add` for paths relative to the SVN working copy. |
+Finalizing saves the usual timestamped files inside the ticket folder. Directly in the patch root, it creates **only the finalized `.patch`**. Its filename uses today's date, the description, and an author suffix currently fixed in the implementation. The command prints the exact export path.
 
-For example, `gitsvn revert 18814 20261002_143000_123456` restores that saved timestamp. Use the exact snapshot name shown by `log`. Restoring an older snapshot makes it the branch's saved head for future switches.
+Patch headers are always relative to the selected SVN working-copy root, regardless of where you run the command. For example, a file at `D:\Source\ExampleProject\src\Example.cs` appears as `Index: src/Example.cs`.
 
-`gitsvn finalize FixSviewPriority 18814` saves a normal timestamped `.patch`, `.txt` and `.json` commit under `D:\Patches\18814`, then exports the same patch content as `D:\Patches\YYYY_MM_DD_FixSviewPriority_BalcarM.patch` using today's date. The patch root receives only the finalized `.patch` file. Omit `18814` to use the current branch's folder. Quoted descriptions such as `"Fix Sview Priority"` use underscores in the filename. Existing finalized patches are never overwritten; use a different description for another export on the same day. Finalizing updates the destination ticket's saved head and keeps the active branch selected. `--latest` uses the source branch's saved head, including an older snapshot selected with `revert`, or the newest patch when there is no recorded head.
+## Supported changes
 
-Every patch is a complete snapshot relative to SVN BASE, not an incremental commit. Switching or restoring first reverts the working copy and then applies one patch; snapshots must not be applied cumulatively. With `autosave` enabled, automatic saves preserve outgoing changes before a switch. Explicit restores also save outgoing changes. A rejected patch causes restoration to roll back. Committing clean trunk state saves an empty patch, so returning to a clean branch is also remembered.
+The snapshot workflow supports text changes, SVN properties, additions, deletions, and empty files or directories. Files in the `ignore-on-commit` changelist are excluded and preserved. Unversioned and SVN-ignored files stay untouched; schedule new files with `add` before committing them.
 
-Each snapshot has a matching `.txt` message and a small `.json` metadata file for empty files, directories and empty-file properties. Keep these files together. A new branch's initial patch is empty and its message says it was created from trunk; creating a branch leaves current edits in place until you switch.
+Binary changes, SVN copies or moves, replacements, missing files, and unresolved conflicts stop snapshot creation before changes are reverted. A scheduled deletion that still exists on disk needs its local data moved aside first. Resolve SVN update conflicts with your usual SVN tools before switching branches.
 
-SVN commands always run at `D:\Elektlabs`, regardless of the directory where you invoke `gitsvn`. Patch headers are relative to that root, for example `Index: masa/applications/www.test/UnitTests/SViewPriorityTest.cs`; they do not include a drive letter or an `Elektlabs/` prefix. Snapshot files are stored separately under `D:\Patches\<branch>`.
+## Help and checks
 
-Files in SVN's `ignore-on-commit` changelist remain excluded from saved commits. Unversioned and SVN-ignored files stay untouched; unversioned files are not captured until added with `gitsvn add` or `svn add`. Existing `.patch` files are listed and usable even without a matching `.txt` message.
-
-Binary changes, SVN copies/moves, replacements, missing files and unresolved conflicts cannot be captured safely by this patch workflow. A scheduled deletion that still exists on disk also needs its local data moved aside first. The command stops before reverting these changes. `pull` saves current changes before updating; resolve any update conflicts with your usual SVN tools before switching.
-
-Override paths before the command:
-
-```bat
-gitsvn --svn-root C:\work\svn --patch-root C:\work\patches --state-dir C:\work\gitsvn-state status
+```powershell
+gitsvn --help
+gitsvn finalize --help
 ```
 
-Run `gitsvn --help` or `gitsvn COMMAND --help` for command options.
+To run the integration checks from the program folder, also make `svnadmin` available on PATH:
 
-The integration checks use temporary local SVN repositories and never touch `D:\Elektlabs`:
-
-```bat
+```powershell
 python -m unittest discover -s tests -v
 ```
+
+The checks use temporary local SVN repositories and separate state and patch folders.
