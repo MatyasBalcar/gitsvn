@@ -2,12 +2,14 @@
 
 import argparse
 import base64
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 import json
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -35,6 +37,103 @@ class Snapshot:
     patch: bytes
     entries: list
     empty_properties: dict
+
+
+@contextmanager
+def picker_input():
+    if os.name != "nt" or not sys.stdin.isatty() or not sys.stdout.isatty():
+        yield None
+        return
+    import ctypes
+    from ctypes import wintypes
+    import msvcrt
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    get_mode = kernel32.GetConsoleMode
+    get_mode.argtypes = (wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD))
+    get_mode.restype = wintypes.BOOL
+    set_mode = kernel32.SetConsoleMode
+    set_mode.argtypes = (wintypes.HANDLE, wintypes.DWORD)
+    set_mode.restype = wintypes.BOOL
+    try:
+        handle = msvcrt.get_osfhandle(sys.stdout.fileno())
+    except (OSError, ValueError):
+        yield None
+        return
+    mode = wintypes.DWORD()
+    # Enable ANSI cursor movement in cmd and restore its original setting afterward.
+    if not get_mode(handle, ctypes.byref(mode)) or not set_mode(handle, mode.value | 0x0004):
+        yield None
+        return
+    try:
+        yield msvcrt.getwch
+    finally:
+        set_mode(handle, mode.value)
+
+
+def pick_item(labels, title, item, current=None, current_label="current"):
+    labels = [" ".join(label.split()) for label in labels]
+    with picker_input() as read_key:
+        if read_key is None:
+            print(title + (f" (* = {current_label}):" if current is not None else ":"))
+            for index, label in enumerate(labels):
+                print(f"{index + 1:3}. {'*' if index == current else ' '} {label}")
+            try:
+                choice = input(f"{item.capitalize()} number (q to cancel): ").strip()
+            except EOFError:
+                return None
+            if choice.lower() in ("", "q", "quit"):
+                return None
+            if not choice.isdigit() or not 1 <= int(choice) <= len(labels):
+                raise GitSvnError(f"Choose a {item} number shown in the list.")
+            return int(choice) - 1
+
+        selected = current if current is not None else 0
+        size = shutil.get_terminal_size()
+        rows = min(len(labels), max(1, size.lines - 3))
+        width = max(1, size.columns - 1)
+        print(f"{title} ({len(labels)} choices; Up/Down, Enter; Esc/q cancels)"[:width])
+        try:
+            sys.stdout.write("\x1b[?25l")
+            while True:
+                start = max(0, min(selected - rows // 2, len(labels) - rows))
+                for index in range(start, start + rows):
+                    line = "> " if index == selected else "  "
+                    if index == current:
+                        line += f"({current_label}) "
+                    line += labels[index]
+                    if index == selected:
+                        line = "\x1b[7m" + line[:width] + "\x1b[0m"
+                    else:
+                        line = line[:width]
+                    sys.stdout.write("\r\x1b[2K" + line + "\n")
+                sys.stdout.flush()
+                key = read_key()
+                if key in ("\r", "\n"):
+                    return selected
+                if key in ("\x1b", "q", "Q"):
+                    return None
+                if key == "\x03":
+                    raise KeyboardInterrupt
+                if key in ("\x00", "\xe0"):
+                    key = read_key()
+                    if key == "H":
+                        selected = (selected - 1) % len(labels)
+                    elif key == "P":
+                        selected = (selected + 1) % len(labels)
+                    elif key == "G":
+                        selected = 0
+                    elif key == "O":
+                        selected = len(labels) - 1
+                sys.stdout.write(f"\x1b[{rows}A")
+        finally:
+            sys.stdout.write("\x1b[0m\x1b[?25h")
+            sys.stdout.flush()
+
+
+def pick_branch(names, current):
+    selected = pick_item(names, "Switch branch", "branch", names.index(current))
+    return names[selected] if selected is not None else None
 
 
 class GitSvn:
@@ -282,14 +381,17 @@ class GitSvn:
         return (message.read_text(encoding="utf-8-sig", errors="replace").strip()
                 if message.is_file() else "(no message)")
 
+    def snapshot_label(self, path):
+        try:
+            saved_at = datetime.strptime(path.stem, "%Y%m%d_%H%M%S_%f")
+        except ValueError:
+            saved_at = datetime.fromtimestamp(path.stat().st_mtime)
+        return f"{saved_at:%d.%m.%Y %H:%M:%S}  {self.message(path)}  [{path.stem}]"
+
     def list_history(self, branch):
         paths = self.history(branch)
         for number, path in enumerate(paths, 1):
-            try:
-                saved_at = datetime.strptime(path.stem, "%Y%m%d_%H%M%S_%f")
-            except ValueError:
-                saved_at = datetime.fromtimestamp(path.stat().st_mtime)
-            print(f"{number:>3}. {saved_at:%d.%m.%Y %H:%M:%S}  {self.message(path)}  [{path.stem}]")
+            print(f"{number:>3}. {self.snapshot_label(path)}")
         if not paths:
             print(f"No snapshots in {branch}.")
         return paths
@@ -302,7 +404,7 @@ class GitSvn:
         self.save_snapshot(name, Snapshot("", b"", [], {}), f"Created branch {name} from trunk")
         print(f"Use gitsvn switch {name} to select it.")
 
-    def list_branches(self):
+    def branches(self):
         names = {self.branch}
         if self.patch_root.is_dir():
             for directory in self.patch_root.iterdir():
@@ -312,7 +414,10 @@ class GitSvn:
                     except GitSvnError:
                         continue
                     names.add(directory.name)
-        for name in sorted(names):
+        return sorted(names)
+
+    def list_branches(self):
+        for name in self.branches():
             print(f"{'*' if name == self.branch else ' '} {name}")
 
     def load_snapshot(self, path):
@@ -549,7 +654,12 @@ class GitSvn:
                 temporary_backup.with_suffix(".json").unlink(missing_ok=True)
         print(f"On branch {branch}, restored {path.stem}.")
 
-    def switch(self, branch):
+    def switch(self, branch=None):
+        if branch is None:
+            branch = pick_branch(sorted(set(self.branches()) | {"trunk"}), self.branch)
+            if branch is None:
+                print("Switch cancelled.")
+                return
         if branch == self.branch:
             print(f"Already on branch {branch}.")
             return
@@ -569,20 +679,18 @@ class GitSvn:
             if path is None:
                 raise GitSvnError(f"Snapshot does not exist: {branch}/{name}")
         else:
-            history = self.list_history(branch)
+            history = self.history(branch)
             if not history:
+                print(f"No snapshots in {branch}.")
                 return
-            try:
-                choice = input("Snapshot number (q to cancel): ").strip()
-            except EOFError:
+            head = self.state["heads"].get(branch)
+            current = next((index for index, path in enumerate(history) if path.stem == head), None)
+            choice = pick_item([self.snapshot_label(path) for path in history],
+                               f"Revert snapshot in {branch}", "snapshot", current, "saved head")
+            if choice is None:
                 print("Restore cancelled.")
                 return
-            if choice.lower() in ("", "q", "quit"):
-                print("Restore cancelled.")
-                return
-            if not choice.isdigit() or not 1 <= int(choice) <= len(history):
-                raise GitSvnError("Choose a snapshot number shown in the list.")
-            path = history[int(choice) - 1]
+            path = history[choice]
         self.restore(branch, path)
 
     def commit(self, message):
@@ -648,7 +756,7 @@ def parser():
     branch = commands.add_parser("branch", help="List branches or initialize a clean-trunk branch")
     branch.add_argument("name", nargs="?")
     switch = commands.add_parser("switch", help="Restore a branch using the autosave setting")
-    switch.add_argument("name")
+    switch.add_argument("name", nargs="?", help="Branch to restore; omit to open the branch picker")
     commit = commands.add_parser("commit", help="Save a timestamped patch and message")
     commit.add_argument("-m", "--message", required=True)
     finalize = commands.add_parser("finalize", help="Export a date/description-named ticket patch")
@@ -659,7 +767,7 @@ def parser():
     log.add_argument("branch", nargs="?")
     revert = commands.add_parser("revert", help="Choose a saved snapshot to restore")
     revert.add_argument("branch", nargs="?")
-    revert.add_argument("snapshot", nargs="?")
+    revert.add_argument("snapshot", nargs="?", help="Snapshot ID; omit to open the snapshot picker")
     commands.add_parser("pull", help="Autosave changes and run svn update")
     commands.add_parser("status", help="Show active branch and SVN status")
     add = commands.add_parser("add", help="Schedule working-copy paths with svn add")

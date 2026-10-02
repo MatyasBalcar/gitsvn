@@ -1,7 +1,9 @@
 """Integration coverage using isolated, local SVN repositories."""
 
 import base64
+import io
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -12,7 +14,7 @@ from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
-from main import GitSvn, GitSvnError
+from main import GitSvn, GitSvnError, pick_branch
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -162,6 +164,94 @@ class GitSvnIntegrationTests(unittest.TestCase):
         self.assertEqual(self.read("story.txt"), "unsaved trunk work\n")
         self.cli("switch", "18814")
         self.assertEqual(self.read("story.txt"), "unsaved branch work\n")
+
+    def test_switch_picker_restores_selected_branch_and_autosaves(self):
+        self.new_branch()
+        self.write("story.txt", "saved branch work\n")
+        self.commit("saved work")
+        self.cli("switch", "trunk")
+        self.write("story.txt", "unsaved trunk work\n")
+
+        result = self.cli("switch", input="1\n")
+
+        self.assertIn("18814", result.stdout)
+        self.assertIn("* trunk", result.stdout)
+        self.assertIn("On branch 18814", result.stdout)
+        self.assertEqual(self.read("story.txt"), "saved branch work\n")
+        self.cli("switch", "trunk")
+        self.assertEqual(self.read("story.txt"), "unsaved trunk work\n")
+
+    def test_switch_picker_respects_disabled_autosave(self):
+        self.configure(autosave=False)
+        self.new_branch()
+        self.write("story.txt", "saved branch work\n")
+        self.commit("saved work")
+        self.cli("switch", "trunk")
+        self.write("story.txt", "uncommitted trunk work\n")
+        patches_before = self.tree_contents(self.patches)
+
+        self.cli("switch", input="1\n")
+
+        self.assertEqual(self.read("story.txt"), "saved branch work\n")
+        self.assertEqual(self.tree_contents(self.patches), patches_before)
+        self.assertEqual(json.loads((self.state / "state.json").read_text(encoding="utf-8"))
+                         ["branch"], "18814")
+
+    def test_switch_picker_includes_trunk_before_it_has_snapshots(self):
+        self.configure(autosave=False)
+        self.new_branch()
+        self.assertFalse((self.patches / "trunk").exists())
+
+        result = self.cli("switch", input="2\n")
+
+        self.assertIn("trunk", result.stdout)
+        self.assertIn("On branch trunk", result.stdout)
+        self.assertEqual(self.read("story.txt"), "original\n")
+        self.assertEqual(len(self.snapshots("trunk")), 1)
+
+    def test_switch_picker_cancellation_and_current_branch_preserve_work(self):
+        self.new_branch()
+        self.cli("branch", "19999")
+        self.write("story.txt", "pending work must survive the picker\n")
+        # Unrelated folders and finalized patches must not appear as branches.
+        (self.patches / "empty-folder").mkdir()
+        invalid = self.patches / "bad name"
+        invalid.mkdir()
+        (invalid / "unrelated.patch").write_bytes(b"")
+        (self.patches / "export.patch").write_bytes(b"")
+        patches_before = self.tree_contents(self.patches)
+        state_before = self.tree_contents(self.state)
+        status_before = ET.canonicalize(self.svn("status", "--xml").stdout)
+
+        for choice in ("q\n", "\n", "", "1\n"):
+            with self.subTest(choice=choice):
+                result = self.cli("switch", input=choice)
+                self.assertIn("* 18814", result.stdout)
+                self.assertIn("19999", result.stdout)
+                self.assertIn("trunk", result.stdout)
+                self.assertNotIn("empty-folder", result.stdout)
+                self.assertNotIn("bad name", result.stdout)
+                self.assertNotIn("export.patch", result.stdout)
+                self.assertIn("Already on branch" if choice == "1\n" else "Switch cancelled",
+                              result.stdout)
+                self.assertEqual(self.tree_contents(self.patches), patches_before)
+                self.assertEqual(self.tree_contents(self.state), state_before)
+                self.assertEqual(self.read("story.txt"), "pending work must survive the picker\n")
+                self.assertEqual(ET.canonicalize(self.svn("status", "--xml").stdout), status_before)
+
+    def test_switch_picker_invalid_choice_preserves_work(self):
+        self.new_branch()
+        self.write("story.txt", "pending work must survive invalid choice\n")
+        patches_before = self.tree_contents(self.patches)
+        state_before = self.tree_contents(self.state)
+
+        for choice in ("0\n", "99\n", "invalid\n"):
+            with self.subTest(choice=choice):
+                result = self.cli("switch", input=choice, success=False)
+                self.assertIn("Choose a branch number", result.stderr)
+                self.assertEqual(self.tree_contents(self.patches), patches_before)
+                self.assertEqual(self.tree_contents(self.state), state_before)
+                self.assertEqual(self.read("story.txt"), "pending work must survive invalid choice\n")
 
     def test_switch_autosave_defaults_true_when_config_key_missing(self):
         self.configure()
@@ -621,10 +711,103 @@ class GitSvnIntegrationTests(unittest.TestCase):
         self.write("story.txt", "still unsaved\n")
         patches_before = self.tree_contents(self.patches)
         state_before = self.tree_contents(self.state)
-        result = self.cli("revert", "18814", input="q\n")
-        self.assertIn(snapshot, result.stdout)
-        self.assertIn("visible snapshot message", result.stdout)
-        self.assertEqual(self.read("story.txt"), "still unsaved\n")
+        for choice in ("q\n", "\n", ""):
+            with self.subTest(choice=choice):
+                result = self.cli("revert", "18814", input=choice)
+                self.assertIn(snapshot, result.stdout)
+                self.assertIn("visible snapshot message", result.stdout)
+                self.assertIn("Restore cancelled", result.stdout)
+                self.assertEqual(self.read("story.txt"), "still unsaved\n")
+                self.assertEqual(self.tree_contents(self.patches), patches_before)
+                self.assertEqual(self.tree_contents(self.state), state_before)
+
+    def test_revert_picker_selected_snapshot_is_head_despite_newer_autosave(self):
+        self.configure(autosave=False)
+        self.new_branch()
+        self.write("story.txt", "first saved version\n")
+        first = self.commit("first version")
+        self.write("story.txt", "second saved version\n")
+        self.commit("second version")
+        self.write("story.txt", "unsaved work before reverting\n")
+        app = GitSvn(self.wc, self.patches, self.state)
+        history = app.history("18814")
+        choice = next(index for index, path in enumerate(history, 1) if path.stem == first)
+        snapshots_before = set(history)
+
+        result = self.cli("revert", input=f"{choice}\n")
+
+        self.assertIn("saved head", result.stdout)
+        saved_at = datetime.strptime(first, "%Y%m%d_%H%M%S_%f")
+        self.assertIn(f"{saved_at:%d.%m.%Y %H:%M:%S}", result.stdout)
+        self.assertEqual(self.read("story.txt"), "first saved version\n")
+        autosaves = set(self.snapshots("18814")) - snapshots_before
+        self.assertEqual(len(autosaves), 1)
+        autosave = autosaves.pop()
+        self.assertGreater(autosave.stem, first)
+        self.assertIn("+unsaved work before reverting", autosave.read_text(encoding="utf-8"))
+        state = json.loads((self.state / "state.json").read_text(encoding="utf-8"))
+        self.assertEqual(state["heads"]["18814"], first)
+        self.assertNotEqual(state["heads"]["18814"], autosave.stem)
+        self.cli("switch", "trunk")
+        self.cli("switch", "18814")
+        self.assertEqual(self.read("story.txt"), "first saved version\n")
+
+    def test_revert_picker_arrow_selection_and_saved_head_highlight(self):
+        self.new_branch()
+        self.write("story.txt", "first saved version\n")
+        first = self.commit("first line\nsecond line")
+        self.write("story.txt", "second saved version\n")
+        self.commit("second version")
+        app = GitSvn(self.wc, self.patches, self.state)
+        output = io.StringIO()
+        with patch("main.picker_input") as console, patch("main.sys.stdout", output):
+            console.return_value.__enter__.return_value = iter(["\xe0", "P", "\r"]).__next__
+            app.select_restore("18814", None)
+        self.assertEqual(self.read("story.txt"), "first saved version\n")
+        self.assertEqual(app.state["heads"]["18814"], first)
+        self.assertIn("first line second line", output.getvalue())
+
+        # Reopening the menu selects the saved head, not the newer recovery autosave.
+        self.write("story.txt", "unsaved work while browsing\n")
+        patches_before = self.tree_contents(self.patches)
+        state_before = self.tree_contents(self.state)
+        output = io.StringIO()
+        with patch("main.picker_input") as console, patch("main.sys.stdout", output):
+            console.return_value.__enter__.return_value = iter(["\x1b"]).__next__
+            app.select_restore("18814", None)
+        saved_at = datetime.strptime(first, "%Y%m%d_%H%M%S_%f")
+        self.assertIn(f"\x1b[7m> (saved head) {saved_at:%d.%m.%Y %H:%M:%S} first line second line",
+                      output.getvalue())
+        self.assertIn("Autosave before restoring", output.getvalue())
+        self.assertIn("Restore cancelled", output.getvalue())
+        self.assertEqual(self.read("story.txt"), "unsaved work while browsing\n")
+        self.assertEqual(self.tree_contents(self.patches), patches_before)
+        self.assertEqual(self.tree_contents(self.state), state_before)
+
+    def test_revert_picker_invalid_choice_preserves_work(self):
+        self.new_branch()
+        self.write("story.txt", "unsaved work must survive invalid choice\n")
+        patches_before = self.tree_contents(self.patches)
+        state_before = self.tree_contents(self.state)
+        for choice in ("0\n", "99\n", "invalid\n"):
+            with self.subTest(choice=choice):
+                result = self.cli("revert", "18814", input=choice, success=False)
+                self.assertIn("Choose a snapshot number", result.stderr)
+                self.assertEqual(self.read("story.txt"), "unsaved work must survive invalid choice\n")
+                self.assertEqual(self.tree_contents(self.patches), patches_before)
+                self.assertEqual(self.tree_contents(self.state), state_before)
+
+    def test_revert_picker_empty_history_preserves_work(self):
+        (self.patches / "empty").mkdir(parents=True)
+        self.write("story.txt", "unsaved work with no snapshots\n")
+        patches_before = self.tree_contents(self.patches)
+        state_before = self.tree_contents(self.state)
+
+        result = self.cli("revert", "empty")
+
+        self.assertIn("No snapshots in empty", result.stdout)
+        self.assertNotIn("Snapshot number", result.stdout)
+        self.assertEqual(self.read("story.txt"), "unsaved work with no snapshots\n")
         self.assertEqual(self.tree_contents(self.patches), patches_before)
         self.assertEqual(self.tree_contents(self.state), state_before)
 
@@ -1165,6 +1348,56 @@ class GitSvnIntegrationTests(unittest.TestCase):
         self.assertEqual(self.read("story.txt"), "pending work must survive unsafe name\n")
         self.assertFalse((self.root / "escape").exists())
         self.assertFalse((self.root / "absolute").exists())
+
+
+class BranchPickerTests(unittest.TestCase):
+    def choose(self, keys, names=None, current="trunk", lines=24):
+        output = io.StringIO()
+        with patch("main.picker_input") as console, patch("main.sys.stdout", output), \
+                patch("main.shutil.get_terminal_size", return_value=os.terminal_size((80, lines))):
+            console.return_value.__enter__.return_value = iter(keys).__next__
+            selected = pick_branch(names or ["18814", "19999", "trunk"], current)
+        return selected, output.getvalue()
+
+    def test_enter_selects_current_branch(self):
+        selected, output = self.choose(["\r"])
+        self.assertEqual(selected, "trunk")
+        self.assertIn("(current) trunk", output)
+        self.assertIn("\x1b[7m> (current) trunk\x1b[0m", output)
+        self.assertTrue(output.endswith("\x1b[0m\x1b[?25h"))
+
+    def test_arrow_keys_support_windows_prefixes_and_wrap(self):
+        for keys, expected in ((["\xe0", "H", "\r"], "19999"),
+                               (["\x00", "P", "\r"], "18814"),
+                               (["\xe0", "P", "\x00", "H", "\r"], "trunk")):
+            with self.subTest(keys=keys):
+                selected, _ = self.choose(keys)
+                self.assertEqual(selected, expected)
+
+    def test_escape_and_q_cancel(self):
+        for key in ("\x1b", "q", "Q"):
+            with self.subTest(key=key):
+                selected, output = self.choose([key])
+                self.assertIsNone(selected)
+                self.assertTrue(output.endswith("\x1b[0m\x1b[?25h"))
+
+    def test_long_list_scrolls_to_selected_branch(self):
+        names = [f"branch-{index:02}" for index in range(35)]
+        selected, output = self.choose(["\xe0", "G", "\r"], names, names[-1], lines=8)
+        self.assertEqual(selected, names[0])
+        self.assertIn("(current) " + names[-1], output)
+        self.assertIn("> " + names[0], output)
+        self.assertIn("\x1b[5A", output)
+        selected, _ = self.choose(["\x00", "O", "\r"], names, names[0], lines=8)
+        self.assertEqual(selected, names[-1])
+
+    def test_keyboard_interrupt_restores_cursor(self):
+        output = io.StringIO()
+        with patch("main.picker_input") as console, patch("main.sys.stdout", output):
+            console.return_value.__enter__.return_value = iter(["\x03"]).__next__
+            with self.assertRaises(KeyboardInterrupt):
+                pick_branch(["18814", "trunk"], "trunk")
+        self.assertTrue(output.getvalue().endswith("\x1b[0m\x1b[?25h"))
 
 
 if __name__ == "__main__":

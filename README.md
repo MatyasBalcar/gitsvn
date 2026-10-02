@@ -85,24 +85,29 @@ Use `gitsvn [options] <command>`:
 | --- | --- |
 | `branch` | List local branches; `*` marks the current branch. |
 | `branch NAME` | Create or locate a branch folder and initialize it when needed. |
-| `switch NAME` | Restore the branch's saved head, optionally saving outgoing changes according to `autosave`. |
+| `switch [NAME]` | Restore the branch's saved head, optionally saving outgoing changes according to `autosave`. Omit the name to open the branch picker. |
 | `status` | Show the current branch and SVN status. |
 | `add PATH...` | Schedule new files or folders with SVN. Paths are relative to the working-copy root. |
 | `commit -m MESSAGE` | Save a timestamped patch, message, and snapshot metadata in the current branch folder. |
 | `log [BRANCH]` | List saved versions with readable dates, times, messages, and snapshot IDs. Defaults to the current branch. |
-| `revert [BRANCH] [SNAPSHOT]` | Restore a saved version and select its branch. Without a snapshot name, show a numbered picker; enter `q` to cancel. |
+| `revert [BRANCH] [SNAPSHOT]` | Restore a saved version and select its branch. Omit the snapshot ID to open the snapshot picker; the branch defaults to the current branch. |
 | `finalize DESCRIPTION [TICKET]` | Save a normal commit in the ticket folder and export a named patch directly into the patch root. The ticket defaults to the current branch. |
 | `pull` | Save pending changes for recovery, then run SVN update at the working-copy root, excluding externals. |
 
 Examples:
 
 ```powershell
+gitsvn switch
 gitsvn revert 12345
 gitsvn revert 12345 20261002_143000_123456
 gitsvn finalize "Fix input validation" 12345
 gitsvn finalize SavedVersion 12345 --latest
 gitsvn pull
 ```
+
+`gitsvn switch` opens a terminal menu of local branches, including `trunk`, with the current branch highlighted. Use **Up/Down** to choose and **Enter** to switch; **Esc** or **q** cancels. Long lists scroll as you move. When the terminal cannot display the menu or input/output is redirected, it shows a numbered list instead. Selecting the current branch or cancelling leaves your work and history untouched.
+
+`gitsvn revert` uses the same controls to choose a snapshot from the current branch; `gitsvn revert 12345` chooses from that branch. Each entry shows its date, time, message, and snapshot ID. The branch's **saved head** is marked and selected initially; if none is recorded, the newest snapshot is selected. Cancelling leaves your work and history untouched. After restoring, the selected snapshot becomes the branch's head, even when the recovery autosave has a newer timestamp.
 
 `log` shows local dates and times as `DD.MM.YYYY HH:MM:SS`. The snapshot ID appears in brackets after the message; use that exact ID with `revert`. Dates come from generated snapshot names, or the file's last-modified time for older imported patches. Restoring an older version makes it the branch's saved head for future switches.
 
