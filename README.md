@@ -66,6 +66,7 @@ gitsvn branch 12345
 gitsvn switch 12345
 
 # Edit files in the SVN working copy. Add new files before saving them.
+# Edited files dont need to be added, just created ones 
 gitsvn add src\Example.cs
 gitsvn commit -m "Fix input validation"
 
@@ -88,7 +89,7 @@ Use `gitsvn [options] <command>`:
 | `status` | Show the current branch and SVN status. |
 | `add PATH...` | Schedule new files or folders with SVN. Paths are relative to the working-copy root. |
 | `commit -m MESSAGE` | Save a timestamped patch, message, and snapshot metadata in the current branch folder. |
-| `log [BRANCH]` | List saved versions and their messages. Defaults to the current branch. |
+| `log [BRANCH]` | List saved versions with readable dates, times, messages, and snapshot IDs. Defaults to the current branch. |
 | `revert [BRANCH] [SNAPSHOT]` | Restore a saved version and select its branch. Without a snapshot name, show a numbered picker; enter `q` to cancel. |
 | `finalize DESCRIPTION [TICKET]` | Save a normal commit in the ticket folder and export a named patch directly into the patch root. The ticket defaults to the current branch. |
 | `pull` | Save pending changes for recovery, then run SVN update at the working-copy root, excluding externals. |
@@ -103,7 +104,7 @@ gitsvn finalize SavedVersion 12345 --latest
 gitsvn pull
 ```
 
-Use the exact snapshot name shown by `log`. Restoring an older version makes it the branch's saved head for future switches.
+`log` shows local dates and times as `DD.MM.YYYY HH:MM:SS`. The snapshot ID appears in brackets after the message; use that exact ID with `revert`. Dates come from generated snapshot names, or the file's last-modified time for older imported patches. Restoring an older version makes it the branch's saved head for future switches.
 
 `finalize` normally captures current changes. With `--latest`, it uses the current branch's saved head, or the newest saved patch when no head is recorded. An explicit ticket selects the destination folder and keeps the current branch selected. Finalizing updates the destination's saved head.
 
@@ -128,7 +129,7 @@ Command-line options override the corresponding configuration settings and go **
 gitsvn --config C:\Work\another-project.json status
 ```
 
-Without `--config`, an explicit `--state-dir PATH` loads `PATH\config.json` for compatibility with existing setups. When both are supplied, `--config` selects the file and `--state-dir` overrides where state is stored. `--svn-root` and `--patch-root` are also available as overrides. Missing files or settings keep the existing defaults.
+Without `--config`, an explicit `--state-dir PATH` loads `PATH\config.json` for compatibility with existing setups. When both are supplied, `--config` selects the file and `--state-dir` overrides where state is stored. `--svn-root` and `--patch-root` are also available as overrides. Missing optional configuration or omitted settings keep the existing defaults. A file explicitly selected with `--config` must exist.
 
 `autosave` controls branch switching:
 

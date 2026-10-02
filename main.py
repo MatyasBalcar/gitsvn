@@ -285,7 +285,11 @@ class GitSvn:
     def list_history(self, branch):
         paths = self.history(branch)
         for number, path in enumerate(paths, 1):
-            print(f"{number:>3}. {path.stem}  {self.message(path)}")
+            try:
+                saved_at = datetime.strptime(path.stem, "%Y%m%d_%H%M%S_%f")
+            except ValueError:
+                saved_at = datetime.fromtimestamp(path.stat().st_mtime)
+            print(f"{number:>3}. {saved_at:%d.%m.%Y %H:%M:%S}  {self.message(path)}  [{path.stem}]")
         if not paths:
             print(f"No snapshots in {branch}.")
         return paths
