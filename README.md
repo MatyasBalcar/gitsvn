@@ -109,7 +109,7 @@ gitsvn pull
 
 `gitsvn revert` uses the same controls to choose a snapshot from the current branch; `gitsvn revert 12345` chooses from that branch. Each entry shows its date, time, message, and snapshot ID. The branch's **saved head** is marked and selected initially; if none is recorded, the newest snapshot is selected. Cancelling leaves your work and history untouched. After restoring, the selected snapshot becomes the branch's head, even when the recovery autosave has a newer timestamp.
 
-`log` shows local dates and times as `DD.MM.YYYY HH:MM:SS`. The snapshot ID appears in brackets after the message; use that exact ID with `revert`. Dates come from generated snapshot names, or the file's last-modified time for older imported patches. Restoring an older version makes it the branch's saved head for future switches.
+`log` shows local dates and times as `DD.MM.YYYY HH:MM:SS`. The snapshot ID appears in brackets after the message; use that exact ID with `revert`. The branch's saved head is marked **`(current version)`**, even when a newer recovery autosave appears above it. Dates come from generated snapshot names, or the file's last-modified time for older imported patches. Restoring an older version makes it the branch's saved head for future switches.
 
 `finalize` normally captures current changes. With `--latest`, it uses the current branch's saved head, or the newest saved patch when no head is recorded. An explicit ticket selects the destination folder and keeps the current branch selected. Finalizing updates the destination's saved head.
 

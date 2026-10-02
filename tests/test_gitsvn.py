@@ -748,6 +748,11 @@ class GitSvnIntegrationTests(unittest.TestCase):
         state = json.loads((self.state / "state.json").read_text(encoding="utf-8"))
         self.assertEqual(state["heads"]["18814"], first)
         self.assertNotEqual(state["heads"]["18814"], autosave.stem)
+        log = self.cli("log").stdout
+        self.assertIn(f"[{first}] (current version)", log)
+        self.assertEqual(log.count("(current version)"), 1)
+        autosave_line = next(line for line in log.splitlines() if f"[{autosave.stem}]" in line)
+        self.assertNotIn("(current version)", autosave_line)
         self.cli("switch", "trunk")
         self.cli("switch", "18814")
         self.assertEqual(self.read("story.txt"), "first saved version\n")

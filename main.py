@@ -390,8 +390,10 @@ class GitSvn:
 
     def list_history(self, branch):
         paths = self.history(branch)
+        head = self.state["heads"].get(branch)
         for number, path in enumerate(paths, 1):
-            print(f"{number:>3}. {self.snapshot_label(path)}")
+            marker = " (current version)" if path.stem == head else ""
+            print(f"{number:>3}. {self.snapshot_label(path)}{marker}")
         if not paths:
             print(f"No snapshots in {branch}.")
         return paths
