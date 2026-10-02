@@ -46,6 +46,16 @@ class GitSvn:
             raise GitSvnError("Patch storage must be outside the SVN working copy.")
         if self.state_dir.is_relative_to(self.svn_root):
             raise GitSvnError("State storage must be outside the SVN working copy.")
+        self.config_path = self.state_dir / "config.json"
+        self.config = {"autosave": True}
+        if self.config_path.exists():
+            try:
+                config = json.loads(self.config_path.read_text(encoding="utf-8-sig"))
+                if not isinstance(config, dict) or not isinstance(config.get("autosave", True), bool):
+                    raise ValueError("autosave must be true or false")
+                self.config.update(config)
+            except (ValueError, TypeError) as error:
+                raise GitSvnError(f"Invalid config file: {self.config_path}: {error}") from error
         self.state_path = self.state_dir / "state.json"
         self.state = {
             "version": 1,
@@ -211,8 +221,12 @@ class GitSvn:
 
     def save_snapshot(self, branch, snapshot, message):
         directory = self.branch_path(branch)
-        directory.mkdir(parents=True, exist_ok=True)
         name = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        for extension in (".patch", ".json", ".txt"):
+            path = directory / (name + extension)
+            if path.exists() or path.is_symlink():
+                raise GitSvnError(f"Snapshot already exists: {path}. Choose a different name.")
+        directory.mkdir(parents=True, exist_ok=True)
         created = []
         try:
             for extension, contents in (
@@ -441,7 +455,7 @@ class GitSvn:
                 if not actual or actual.item != "deleted":
                     self.svn("delete", "--", self.target(entry["path"]))
 
-    def restore(self, branch, path):
+    def restore(self, branch, path, autosave=True):
         snapshot = self.load_snapshot(path)
         entries = self.entries()
         details = {entry["path"]: (entry["kind"], entry["item"]) for entry in snapshot.entries}
@@ -451,28 +465,46 @@ class GitSvn:
                                              "modified"))
             touched.append((value, kind, item))
         self.protect_paths(touched, entries)
+        rejects = {self.safe_path(value + ".svnpatch.rej") for value in self.patch_paths(snapshot)}
+        existing_rejects = {value for value in rejects if value.exists()}
         backup = self.capture(entries)
         old_branch = self.branch
         head = self.state["heads"].get(old_branch)
         head_path = self.branch_path(old_branch) / (head + ".patch") if head else None
-        was_dirty = head_path and head_path.exists() and (
+        was_dirty = autosave and head_path and head_path.exists() and (
             head_path.stat().st_size or self.load_snapshot(head_path).entries)
-        if backup.entries or was_dirty:
+        temporary_backup = None
+        self.state_dir.mkdir(parents=True, exist_ok=True)
+        if autosave and (backup.entries or was_dirty):
             self.save_snapshot(old_branch, backup, f"Autosave before restoring {branch}/{path.stem}")
             backup_path = self.branch_path(old_branch) / (backup.name + ".patch")
+        elif backup.entries:
+            try:
+                with tempfile.NamedTemporaryFile(prefix="switch-", suffix=".patch",
+                                                 dir=self.state_dir, delete=False) as handle:
+                    temporary_backup = Path(handle.name)
+                    handle.write(backup.patch)
+                temporary_backup.with_suffix(".json").write_text(json.dumps(
+                    {"version": 1, "entries": backup.entries,
+                     "empty_properties": backup.empty_properties}, indent=2), encoding="utf-8")
+            except OSError:
+                if temporary_backup:
+                    temporary_backup.unlink(missing_ok=True)
+                    temporary_backup.with_suffix(".json").unlink(missing_ok=True)
+                raise
+            backup_path = temporary_backup
         else:
-            self.state_dir.mkdir(parents=True, exist_ok=True)
             backup_path = None
-        rejects = {self.safe_path(value + ".svnpatch.rej") for value in self.patch_paths(snapshot)}
-        existing_rejects = {value for value in rejects if value.exists()}
         previous_state = self.state
+        preserve_backup = True
         try:
             self.revert_entries(entries)
             self.apply_snapshot(path, snapshot)
             self.state = {**previous_state, "branch": branch,
                           "heads": {**previous_state["heads"], branch: path.stem}}
             self.save_state()
-        except (GitSvnError, OSError, ValueError, KeyboardInterrupt) as error:
+            preserve_backup = False
+        except (GitSvnError, OSError, ValueError, ET.ParseError, KeyboardInterrupt) as error:
             self.state = previous_state
             try:
                 self.revert_entries(self.entries())
@@ -480,12 +512,17 @@ class GitSvn:
                     reject.unlink(missing_ok=True)
                 if backup_path:
                     self.apply_snapshot(backup_path, backup)
-            except (GitSvnError, OSError, ValueError) as rollback_error:
+            except (GitSvnError, OSError, ValueError, ET.ParseError, KeyboardInterrupt) as rollback_error:
                 raise GitSvnError(
                     f"Restore failed: {error}\nRollback also failed: {rollback_error}\n"
                     f"Recovery snapshot: {backup_path or '(working copy was clean)'}"
                 ) from rollback_error
+            preserve_backup = False
             raise GitSvnError(f"Restore failed; previous changes restored. {error}") from error
+        finally:
+            if temporary_backup and not preserve_backup:
+                temporary_backup.unlink(missing_ok=True)
+                temporary_backup.with_suffix(".json").unlink(missing_ok=True)
         print(f"On branch {branch}, restored {path.stem}.")
 
     def switch(self, branch):
@@ -499,7 +536,7 @@ class GitSvn:
             raise GitSvnError(f"No snapshots in {branch}; run gitsvn branch {branch} first.")
         head = self.state["heads"].get(branch)
         path = next((path for path in history if path.stem == head), history[0])
-        self.restore(branch, path)
+        self.restore(branch, path, autosave=self.config["autosave"])
 
     def select_restore(self, branch, name):
         if name:
@@ -530,6 +567,41 @@ class GitSvn:
         snapshot = self.capture(self.entries())
         self.save_snapshot(self.branch, snapshot, message)
 
+    def finalize(self, description, ticket, latest=False):
+        name = re.sub(r"\s+", "_", description.strip())
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", name):
+            raise GitSvnError(
+                "Description must start with a letter or number and contain only "
+                "letters, numbers, spaces, dots, '-' or '_'."
+            )
+        branch = ticket or self.branch
+        self.branch_path(branch)
+        name = datetime.now().strftime("%Y_%m_%d_") + name + "_BalcarM.patch"
+        patch_path = self.patch_root / name
+        if patch_path.exists() or patch_path.is_symlink():
+            raise GitSvnError(f"Finalized patch already exists: {patch_path}. Choose another description.")
+        if latest:
+            history = self.history(self.branch)
+            if not history:
+                raise GitSvnError(f"No snapshots in {self.branch}; commit first or omit --latest.")
+            head = self.state["heads"].get(self.branch)
+            path = next((path for path in history if path.stem == head), history[0])
+            snapshot = self.load_snapshot(path)
+        else:
+            snapshot = self.capture(self.entries())
+        self.patch_root.mkdir(parents=True, exist_ok=True)
+        created = False
+        try:
+            with patch_path.open("xb") as handle:
+                created = True
+                handle.write(snapshot.patch)
+            self.save_snapshot(branch, snapshot, description)
+        except (GitSvnError, OSError, KeyboardInterrupt):
+            if created:
+                patch_path.unlink(missing_ok=True)
+            raise
+        print(f"Exported {patch_path}")
+
     def pull(self):
         entries = self.entries()
         snapshot = self.capture(entries)
@@ -550,10 +622,14 @@ def parser():
     commands = result.add_subparsers(dest="command", required=True)
     branch = commands.add_parser("branch", help="List branches or initialize a clean-trunk branch")
     branch.add_argument("name", nargs="?")
-    switch = commands.add_parser("switch", help="Autosave changes and restore a branch")
+    switch = commands.add_parser("switch", help="Restore a branch using the autosave setting")
     switch.add_argument("name")
     commit = commands.add_parser("commit", help="Save a timestamped patch and message")
     commit.add_argument("-m", "--message", required=True)
+    finalize = commands.add_parser("finalize", help="Export a date/description-named ticket patch")
+    finalize.add_argument("description")
+    finalize.add_argument("ticket", nargs="?", help="Destination ticket; defaults to current branch")
+    finalize.add_argument("--latest", action="store_true", help="Export the branch's saved snapshot")
     log = commands.add_parser("log", help="List snapshot timestamps and messages")
     log.add_argument("branch", nargs="?")
     revert = commands.add_parser("revert", help="Choose a saved snapshot to restore")
@@ -570,7 +646,8 @@ def main(argv=None):
     arguments = parser().parse_args(argv)
     try:
         app = GitSvn(arguments.svn_root, arguments.patch_root, arguments.state_dir)
-        if arguments.command in ("switch", "commit", "revert", "pull", "status", "add"):
+        if (arguments.command in ("switch", "commit", "revert", "pull", "status", "add") or
+                (arguments.command == "finalize" and not arguments.latest)):
             app.verify_working_copy()
         if arguments.command == "branch":
             app.create_branch(arguments.name) if arguments.name else app.list_branches()
@@ -578,6 +655,8 @@ def main(argv=None):
             app.switch(arguments.name)
         elif arguments.command == "commit":
             app.commit(arguments.message)
+        elif arguments.command == "finalize":
+            app.finalize(arguments.description, arguments.ticket, arguments.latest)
         elif arguments.command == "log":
             app.list_history(arguments.branch or app.branch)
         elif arguments.command == "revert":

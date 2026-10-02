@@ -8,7 +8,11 @@ import sys
 import tempfile
 import unittest
 import xml.etree.ElementTree as ET
+from datetime import datetime
 from pathlib import Path
+from unittest.mock import patch
+
+from main import GitSvn, GitSvnError
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -76,6 +80,10 @@ class GitSvnIntegrationTests(unittest.TestCase):
 
     def snapshots(self, branch):
         return sorted((self.patches / branch).glob("*.patch"))
+
+    def configure(self, **settings):
+        self.state.mkdir(parents=True, exist_ok=True)
+        (self.state / "config.json").write_text(json.dumps(settings), encoding="utf-8")
 
     def new_branch(self, name="18814"):
         self.cli("branch", name)
@@ -149,6 +157,180 @@ class GitSvnIntegrationTests(unittest.TestCase):
         self.assertEqual(self.read("story.txt"), "unsaved trunk work\n")
         self.cli("switch", "18814")
         self.assertEqual(self.read("story.txt"), "unsaved branch work\n")
+
+    def test_switch_autosave_defaults_true_when_config_key_missing(self):
+        self.configure()
+        self.cli("branch", "18814")
+        self.write("story.txt", "default autosaved trunk work\n")
+        self.cli("switch", "18814")
+        self.assertEqual(self.read("story.txt"), "original\n")
+        self.assertTrue(any("default autosaved trunk work" in path.read_text(encoding="utf-8")
+                            for path in self.snapshots("trunk")))
+        self.cli("switch", "trunk")
+        self.assertEqual(self.read("story.txt"), "default autosaved trunk work\n")
+
+    def test_switch_autosave_false_preserves_history_and_saved_head(self):
+        self.configure(autosave=False)
+        self.cli("branch", "trunk")
+        self.new_branch()
+        self.write("story.txt", "explicitly saved branch work\n")
+        self.commit("saved work")
+        history_before = self.tree_contents(self.patches)
+        heads_before = json.loads((self.state / "state.json").read_text(encoding="utf-8"))["heads"]
+
+        self.write("story.txt", "uncommitted work to discard\n")
+        self.cli("switch", "trunk")
+        self.assertEqual(self.read("story.txt"), "original\n")
+        self.cli("switch", "18814")
+        self.assertEqual(self.read("story.txt"), "explicitly saved branch work\n")
+
+        # A manually cleaned working copy also must not replace the saved head.
+        self.svn("revert", "story.txt")
+        self.cli("switch", "trunk")
+        self.cli("switch", "18814")
+        self.assertEqual(self.read("story.txt"), "explicitly saved branch work\n")
+        self.assertEqual(self.tree_contents(self.patches), history_before)
+        self.assertEqual(json.loads((self.state / "state.json").read_text(encoding="utf-8"))["heads"],
+                         heads_before)
+        self.assertEqual(set(self.tree_contents(self.state)), {"config.json", "state.json"})
+
+    def test_switch_autosave_false_preserves_ignored_and_untracked_files(self):
+        self.configure(autosave=False)
+        self.cli("branch", "trunk")
+        self.new_branch()
+        self.svn("changelist", "ignore-on-commit", "ignored.txt")
+        self.write("ignored.txt", "private ignored edit\n")
+        self.write("story.txt", "uncommitted branch edit\n")
+        self.write("newdir/added.txt", "uncommitted addition\n")
+        self.cli("add", "newdir")
+        self.write("newdir/scratch.txt", "untracked scratch\n")
+        history_before = self.tree_contents(self.patches)
+
+        self.cli("switch", "trunk")
+
+        self.assertEqual(self.read("story.txt"), "original\n")
+        self.assertEqual(self.read("ignored.txt"), "private ignored edit\n")
+        self.assertEqual(self.read("newdir/scratch.txt"), "untracked scratch\n")
+        self.assertFalse((self.wc / "newdir/added.txt").exists())
+        self.assertEqual(self.tree_contents(self.patches), history_before)
+        self.assertEqual(set(self.tree_contents(self.state)), {"config.json", "state.json"})
+
+    def test_invalid_autosave_config_rejected_before_mutation(self):
+        self.new_branch()
+        self.write("story.txt", "keep edits when config is invalid\n")
+        for contents in ("{", "[]", "null", '{"autosave": "false"}',
+                         '{"autosave": 0}', '{"autosave": null}'):
+            with self.subTest(contents=contents):
+                (self.state / "config.json").write_text(contents, encoding="utf-8")
+                patches_before = self.tree_contents(self.patches)
+                state_before = self.tree_contents(self.state)
+                status_before = ET.canonicalize(self.svn("status", "--xml").stdout)
+
+                result = self.cli("switch", "trunk", success=False)
+
+                self.assertIn("config", (result.stdout + result.stderr).lower())
+                self.assertEqual(self.read("story.txt"), "keep edits when config is invalid\n")
+                self.assertEqual(self.tree_contents(self.patches), patches_before)
+                self.assertEqual(self.tree_contents(self.state), state_before)
+                self.assertEqual(ET.canonicalize(self.svn("status", "--xml").stdout), status_before)
+
+    def test_switch_autosave_false_failure_restores_work_without_history(self):
+        self.configure(autosave=False)
+        self.cli("branch", "trunk")
+        self.new_branch()
+        self.write("story.txt", "saved branch change\n")
+        self.commit("branch story")
+        self.cli("switch", "trunk")
+        upstream = self.root / "upstream"
+        self.run_process(["svn", "checkout", self.repo_url, str(upstream)])
+        (upstream / "story.txt").write_text("upstream change\n", encoding="utf-8")
+        self.run_process(["svn", "commit", "-m", "upstream edit"], cwd=upstream)
+        self.svn("update")
+
+        self.write("story.txt", "outgoing dirty story\n")
+        self.write("empty.txt", "")
+        (self.wc / "emptydir").mkdir()
+        self.write("newdir/added.txt", "outgoing addition\n")
+        self.cli("add", "empty.txt", "emptydir", "newdir")
+        self.write("newdir/scratch.txt", "outgoing untracked data\n")
+        self.svn("delete", "removed.txt")
+        self.svn("propset", "custom:flag", "outgoing property", "properties.txt")
+        self.svn("changelist", "ignore-on-commit", "ignored.txt")
+        self.write("ignored.txt", "private ignored edit\n")
+        patches_before = self.tree_contents(self.patches)
+        state_before = self.tree_contents(self.state)
+        status_before = ET.canonicalize(self.svn("status", "--xml").stdout)
+
+        result = self.cli("switch", "18814", success=False)
+
+        self.assertIn("conflict", (result.stdout + result.stderr).lower())
+        self.assertEqual(self.read("story.txt"), "outgoing dirty story\n")
+        self.assertEqual((self.wc / "empty.txt").read_bytes(), b"")
+        self.assertTrue((self.wc / "emptydir").is_dir())
+        self.assertEqual(self.read("newdir/added.txt"), "outgoing addition\n")
+        self.assertEqual(self.read("newdir/scratch.txt"), "outgoing untracked data\n")
+        self.assertFalse((self.wc / "removed.txt").exists())
+        self.assertEqual(self.svn("propget", "custom:flag", "properties.txt").stdout.strip(),
+                         "outgoing property")
+        self.assertEqual(self.read("ignored.txt"), "private ignored edit\n")
+        self.assertEqual(ET.canonicalize(self.svn("status", "--xml").stdout), status_before)
+        self.assertEqual(self.tree_contents(self.patches), patches_before)
+        self.assertEqual(self.tree_contents(self.state), state_before)
+        self.assertFalse(list(self.wc.rglob("*.svnpatch.rej")))
+
+    def test_autosave_false_keeps_explicit_revert_and_pull_backups(self):
+        self.configure(autosave=False)
+        self.new_branch()
+        self.write("story.txt", "saved branch work\n")
+        saved = self.commit("saved work")
+        count_before = len(self.snapshots("18814"))
+        self.write("story.txt", "unsaved work before explicit revert\n")
+
+        self.cli("revert", "18814", saved)
+
+        self.assertEqual(self.read("story.txt"), "saved branch work\n")
+        self.assertEqual(len(self.snapshots("18814")), count_before + 1)
+        self.assertIn("unsaved work before explicit revert",
+                      self.snapshots("18814")[-1].read_text(encoding="utf-8"))
+        self.write("story.txt", "unsaved work before pull\n")
+
+        self.cli("pull")
+
+        self.assertEqual(self.read("story.txt"), "unsaved work before pull\n")
+        self.assertEqual(len(self.snapshots("18814")), count_before + 2)
+        self.assertIn("unsaved work before pull",
+                      self.snapshots("18814")[-1].read_text(encoding="utf-8"))
+
+    def test_switch_autosave_false_interrupted_rollback_keeps_recovery_snapshot(self):
+        self.configure(autosave=False)
+        self.cli("branch", "18814")
+        self.write("story.txt", "outgoing work requiring recovery\n")
+        app = GitSvn(self.wc, self.patches, self.state)
+        patches_before = self.tree_contents(self.patches)
+        state_before = self.tree_contents(self.state)
+
+        with patch.object(app, "apply_snapshot", side_effect=[
+                GitSvnError("target restore failed"), KeyboardInterrupt("rollback interrupted")]):
+            with self.assertRaises(GitSvnError) as caught:
+                app.switch("18814")
+
+        recovery = list(self.state.glob("switch-*.patch"))
+        self.assertEqual(len(recovery), 1)
+        recovery_path = recovery[0]
+        self.assertIn("Rollback also failed", str(caught.exception))
+        self.assertIn(f"Recovery snapshot: {recovery_path}", str(caught.exception))
+        self.assertIn("+outgoing work requiring recovery",
+                      recovery_path.read_text(encoding="utf-8"))
+        self.assertTrue(recovery_path.with_suffix(".json").is_file())
+        recovery_snapshot = app.load_snapshot(recovery_path)
+        self.assertEqual([entry["path"] for entry in recovery_snapshot.entries], ["story.txt"])
+        self.assertEqual(self.tree_contents(self.patches), patches_before)
+        self.assertEqual(app.state, json.loads(state_before["state.json"]))
+        state_after = self.tree_contents(self.state)
+        for name, contents in state_before.items():
+            self.assertEqual(state_after[name], contents)
+        self.assertEqual(set(state_after), set(state_before) | {
+            recovery_path.name, recovery_path.with_suffix(".json").name})
 
     def test_ignored_edits_and_untracked_file_inside_added_directory_survive(self):
         self.new_branch()
@@ -571,6 +753,209 @@ class GitSvnIntegrationTests(unittest.TestCase):
                               if line.startswith(prefix)], [prefix + relative])
         self.assertNotIn(str(self.wc), patch)
         self.assertNotIn(str(self.wc).replace("\\", "/"), patch)
+
+    def test_finalize_captures_pending_work_with_root_relative_headers(self):
+        self.new_branch()
+        relative = "masa/applications/www.test/UnitTests/SViewPriorityTest.cs"
+        self.write(relative, "namespace UnitTests { class SViewPriorityTest {} }\n")
+        self.cli("add", "masa")
+        self.write("story.txt", "pending finalized edit\n")
+        self.svn("changelist", "ignore-on-commit", "ignored.txt")
+        self.write("ignored.txt", "private ignored edit\n")
+        patches_before = self.tree_contents(self.patches)
+        state_before = self.tree_contents(self.state)
+        status_before = ET.canonicalize(self.svn("status", "--xml").stdout)
+        revision_before = self.svn("info", "--show-item", "revision", self.repo_url).stdout
+
+        self.cli("finalize", "Fix priority")
+
+        name = datetime.now().strftime("%Y_%m_%d") + "_Fix_priority_BalcarM"
+        patch_path = self.patches / (name + ".patch")
+        snapshot_path = self.snapshots("18814")[-1]
+        self.assertRegex(snapshot_path.stem, r"^\d{8}_\d{6}_\d{6}$")
+        self.assertEqual(patch_path.read_bytes(), snapshot_path.read_bytes())
+        patch = patch_path.read_text(encoding="utf-8")
+        self.assertIn("+pending finalized edit", patch)
+        self.assertIn(f"Index: {relative}\n", patch)
+        self.assertIn(f"--- {relative}\t(nonexistent)", patch)
+        self.assertIn(f"+++ {relative}\t(working copy)", patch)
+        self.assertNotIn("ignored.txt", patch)
+        self.assertNotIn(str(self.wc), patch)
+        self.assertNotIn(str(self.wc).replace("\\", "/"), patch)
+        self.assertEqual(snapshot_path.with_suffix(".txt").read_text(encoding="utf-8"),
+                         "Fix priority\n")
+        self.assertFalse(patch_path.with_suffix(".txt").exists())
+        self.assertFalse(patch_path.with_suffix(".json").exists())
+        metadata = json.loads(snapshot_path.with_suffix(".json").read_text(encoding="utf-8"))
+        self.assertEqual(metadata["version"], 1)
+        self.assertIn(relative, {entry["path"] for entry in metadata["entries"]})
+        self.assertNotIn("ignored.txt", {entry["path"] for entry in metadata["entries"]})
+        expected_state = json.loads(state_before["state.json"])
+        expected_state["heads"]["18814"] = snapshot_path.stem
+        self.assertEqual(json.loads((self.state / "state.json").read_text(encoding="utf-8")),
+                         expected_state)
+        for path, contents in patches_before.items():
+            self.assertEqual(self.tree_contents(self.patches)[path], contents)
+        self.assertEqual(len(self.tree_contents(self.patches)), len(patches_before) + 4)
+        self.assertEqual(ET.canonicalize(self.svn("status", "--xml").stdout), status_before)
+        self.assertEqual(self.read("story.txt"), "pending finalized edit\n")
+        self.assertEqual(self.read("ignored.txt"), "private ignored edit\n")
+        self.assertEqual(self.svn("info", "--show-item", "revision", self.repo_url).stdout,
+                         revision_before)
+
+    def test_finalize_explicit_ticket_updates_target_head_without_switching(self):
+        self.new_branch()
+        self.write("story.txt", "current branch pending work\n")
+        branch_before = self.tree_contents(self.patches / "18814")
+        state_before = self.tree_contents(self.state)
+        name = datetime.now().strftime("%Y_%m_%d") + "_Other_ticket_BalcarM"
+        patch_path = self.patches / (name + ".patch")
+        for extension in (".txt", ".json"):
+            patch_path.with_suffix(extension).write_bytes(b"unrelated existing companion")
+
+        self.cli("finalize", "Other ticket", "19999")
+
+        snapshots = self.snapshots("19999")
+        self.assertEqual(len(snapshots), 1)
+        snapshot_path = snapshots[0]
+        self.assertRegex(snapshot_path.stem, r"^\d{8}_\d{6}_\d{6}$")
+        self.assertEqual(patch_path.read_bytes(), snapshot_path.read_bytes())
+        self.assertIn("+current branch pending work",
+                      patch_path.read_text(encoding="utf-8"))
+        self.assertEqual(snapshot_path.with_suffix(".txt").read_text(encoding="utf-8"),
+                         "Other ticket\n")
+        self.assertTrue(snapshot_path.with_suffix(".json").is_file())
+        for extension in (".txt", ".json"):
+            self.assertEqual(patch_path.with_suffix(extension).read_bytes(),
+                             b"unrelated existing companion")
+        self.assertEqual(self.tree_contents(self.patches / "18814"), branch_before)
+        expected_state = json.loads(state_before["state.json"])
+        expected_state["heads"]["19999"] = snapshot_path.stem
+        self.assertEqual(json.loads((self.state / "state.json").read_text(encoding="utf-8")),
+                         expected_state)
+        self.assertEqual(self.read("story.txt"), "current branch pending work\n")
+
+    def test_finalize_latest_exports_selected_historical_head_and_metadata(self):
+        self.new_branch()
+        self.write("story.txt", "")
+        self.svn("propset", "custom:flag", "selected historical property", "story.txt")
+        first = self.commit("historical empty file and property")
+        first_path = self.patches / "18814" / (first + ".patch")
+        self.write("story.txt", "newer saved work\n")
+        self.commit("newer branch snapshot")
+        self.cli("revert", "18814", first)
+        self.write("story.txt", "pending work must not be exported\n")
+        binary = b"\x00pending binary\xff"
+        (self.wc / "binary.dat").write_bytes(binary)
+        self.cli("add", "binary.dat")
+        state_before = self.tree_contents(self.state)
+        patches_before = self.tree_contents(self.patches)
+        status_before = ET.canonicalize(self.svn("status", "--xml").stdout)
+        self.assertEqual(json.loads((self.state / "state.json").read_text(encoding="utf-8"))
+                         ["heads"]["18814"], first)
+
+        self.cli("finalize", "Historical export", "19999", "--latest")
+
+        name = datetime.now().strftime("%Y_%m_%d") + "_Historical_export_BalcarM"
+        patch_path = self.patches / (name + ".patch")
+        snapshots = self.snapshots("19999")
+        self.assertEqual(len(snapshots), 1)
+        snapshot_path = snapshots[0]
+        self.assertRegex(snapshot_path.stem, r"^\d{8}_\d{6}_\d{6}$")
+        self.assertEqual(patch_path.read_bytes(), snapshot_path.read_bytes())
+        self.assertEqual(patch_path.read_bytes(), first_path.read_bytes())
+        metadata = json.loads(snapshot_path.with_suffix(".json").read_text(encoding="utf-8"))
+        self.assertEqual(metadata, json.loads(
+            first_path.with_suffix(".json").read_text(encoding="utf-8")))
+        self.assertTrue(metadata["empty_properties"])
+        self.assertEqual(snapshot_path.with_suffix(".txt").read_text(encoding="utf-8"),
+                         "Historical export\n")
+        self.assertFalse(patch_path.with_suffix(".txt").exists())
+        self.assertFalse(patch_path.with_suffix(".json").exists())
+        expected_state = json.loads(state_before["state.json"])
+        expected_state["heads"]["19999"] = snapshot_path.stem
+        self.assertEqual(json.loads((self.state / "state.json").read_text(encoding="utf-8")),
+                         expected_state)
+        for path, contents in patches_before.items():
+            self.assertEqual(self.tree_contents(self.patches)[path], contents)
+        self.assertEqual(len(self.tree_contents(self.patches)), len(patches_before) + 4)
+        self.assertEqual(ET.canonicalize(self.svn("status", "--xml").stdout), status_before)
+        self.assertEqual(self.read("story.txt"), "pending work must not be exported\n")
+        self.assertEqual((self.wc / "binary.dat").read_bytes(), binary)
+
+    def test_finalize_latest_uses_newest_snapshot_when_no_head_is_saved(self):
+        self.new_branch()
+        self.write("story.txt", "saved newest work\n")
+        newest = self.commit("newest saved snapshot")
+        newest_path = self.patches / "18814" / (newest + ".patch")
+        state_path = self.state / "state.json"
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        state["heads"].pop("18814")
+        state_path.write_text(json.dumps(state), encoding="utf-8")
+        self.write("story.txt", "unsaved later work\n")
+        snapshots_before = self.snapshots("18814")
+
+        self.cli("finalize", "Newest export", "--latest")
+
+        name = datetime.now().strftime("%Y_%m_%d") + "_Newest_export_BalcarM"
+        patch_path = self.patches / (name + ".patch")
+        snapshots = self.snapshots("18814")
+        self.assertEqual(len(snapshots), len(snapshots_before) + 1)
+        snapshot_path = snapshots[-1]
+        self.assertRegex(snapshot_path.stem, r"^\d{8}_\d{6}_\d{6}$")
+        self.assertEqual(patch_path.read_bytes(), snapshot_path.read_bytes())
+        self.assertEqual(patch_path.read_bytes(), newest_path.read_bytes())
+        self.assertFalse(patch_path.with_suffix(".txt").exists())
+        self.assertFalse(patch_path.with_suffix(".json").exists())
+        state["heads"]["18814"] = snapshot_path.stem
+        self.assertEqual(json.loads(state_path.read_text(encoding="utf-8")), state)
+        self.assertEqual(self.read("story.txt"), "unsaved later work\n")
+
+    def test_finalize_collisions_preserve_every_file_and_working_state(self):
+        self.new_branch()
+        self.write("story.txt", "saved snapshot\n")
+        self.commit("saved snapshot")
+        self.write("story.txt", "pending work must survive collision\n")
+        for latest in (False, True):
+            with self.subTest(latest=latest):
+                description = f"Collision_{latest}"
+                name = datetime.now().strftime("%Y_%m_%d") + "_" + description + "_BalcarM"
+                (self.patches / (name + ".patch")).write_bytes(b"existing bytes must survive")
+                patches_before = self.tree_contents(self.patches)
+                state_before = self.tree_contents(self.state)
+                status_before = ET.canonicalize(self.svn("status", "--xml").stdout)
+                args = ["finalize", description, "19999"]
+                if latest:
+                    args.append("--latest")
+
+                self.cli(*args, success=False)
+
+                self.assertEqual(self.tree_contents(self.patches), patches_before)
+                self.assertEqual(self.tree_contents(self.state), state_before)
+                self.assertEqual(ET.canonicalize(self.svn("status", "--xml").stdout),
+                                 status_before)
+                self.assertEqual(self.read("story.txt"),
+                                 "pending work must survive collision\n")
+                self.assertFalse((self.patches / "19999").exists())
+
+    def test_finalize_rejects_unsafe_description_and_ticket_before_mutation(self):
+        self.new_branch()
+        self.write("story.txt", "pending work must survive unsafe name\n")
+        patches_before = self.tree_contents(self.patches)
+        state_before = self.tree_contents(self.state)
+        for description in ("", "   ", "../escape", "nested/escape", "nested\\escape",
+                            "bad:name", "bad*name", "bad?name", "bad|name", "nonascii_č"):
+            with self.subTest(description=description):
+                self.cli("finalize", description, success=False)
+        for ticket in ("../escape", "..", "nested/ticket", "nested\\ticket",
+                       str(self.root / "absolute")):
+            with self.subTest(ticket=ticket):
+                self.cli("finalize", "Safe description", ticket, success=False)
+        self.assertEqual(self.tree_contents(self.patches), patches_before)
+        self.assertEqual(self.tree_contents(self.state), state_before)
+        self.assertEqual(self.read("story.txt"), "pending work must survive unsafe name\n")
+        self.assertFalse((self.root / "escape").exists())
+        self.assertFalse((self.root / "absolute").exists())
 
 
 if __name__ == "__main__":
