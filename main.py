@@ -13,6 +13,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import unicodedata
 import xml.etree.ElementTree as ET
 
 
@@ -169,7 +170,7 @@ def picker_input():
 
 
 def pick_item(labels, title, item, current=None, current_label="current"):
-    labels = [" ".join(label.split()) for label in labels]
+    labels = [terminal_text(" ".join(label.split())) for label in labels]
     with picker_input() as read_key:
         if read_key is None:
             print(title + (f" (* = {current_label}):" if current is not None else ":"))
@@ -189,7 +190,8 @@ def pick_item(labels, title, item, current=None, current_label="current"):
         size = shutil.get_terminal_size()
         rows = min(len(labels), max(1, size.lines - 3))
         width = max(1, size.columns - 1)
-        print(f"{title} ({len(labels)} choices; Up/Down, Enter; Esc/q cancels)"[:width])
+        heading = terminal_text(f"{title} ({len(labels)} choices; Up/Down, Enter; Esc/q cancels)")
+        print(terminal_slice(heading, 0, width))
         try:
             sys.stdout.write("\x1b[?25l")
             while True:
@@ -200,9 +202,9 @@ def pick_item(labels, title, item, current=None, current_label="current"):
                         line += f"({current_label}) "
                     line += labels[index]
                     if index == selected:
-                        line = "\x1b[7m" + line[:width] + "\x1b[0m"
+                        line = "\x1b[7m" + terminal_slice(line, 0, width) + "\x1b[0m"
                     else:
-                        line = line[:width]
+                        line = terminal_slice(line, 0, width)
                     sys.stdout.write("\r\x1b[2K" + line + "\n")
                 sys.stdout.flush()
                 key = read_key()
@@ -231,6 +233,102 @@ def pick_item(labels, title, item, current=None, current_label="current"):
 def pick_branch(names, current):
     selected = pick_item(names, "Switch branch", "branch", names.index(current))
     return names[selected] if selected is not None else None
+
+
+def terminal_text(value):
+    # Patch content must not be able to issue terminal control sequences.
+    return "".join(f"\\x{ord(character):02x}" if ord(character) < 32 or
+                   127 <= ord(character) < 160 else character
+                   for character in value.expandtabs(4))
+
+
+def terminal_width(value):
+    return sum(0 if unicodedata.category(character) in ("Mn", "Me", "Cf") else
+               2 if unicodedata.east_asian_width(character) in ("F", "W") else 1
+               for character in value)
+
+
+def terminal_slice(value, left, width):
+    result = []
+    column = 0
+    for character in value:
+        cells = terminal_width(character)
+        if not cells:
+            if result:
+                result.append(character)
+            continue
+        if column >= left + width:
+            break
+        end = column + cells
+        if end > left:
+            if column >= left and end <= left + width:
+                result.append(character)
+            else:
+                # Never draw half of a wide character at a viewport edge.
+                result.append(" " * (min(end, left + width) - max(column, left)))
+        column = end
+    return "".join(result)
+
+
+def view_diff(title, lines):
+    title = terminal_text(title)
+    lines = [terminal_text(line) for line in lines]
+    with picker_input() as read_key:
+        if read_key is None:
+            print(title)
+            for line in lines:
+                print(line)
+            return
+
+        top = left = 0
+        colors = [32 if line.startswith("+") else 31 if line.startswith("-") else
+                  36 if line.startswith(("@@", "##")) else 0 for line in lines]
+        longest = max(map(terminal_width, lines), default=0)
+        controls = "Read-only: Up/Down, PgUp/PgDn, Home/End; Left/Right; Esc/q back"
+        try:
+            sys.stdout.write("\x1b[?1049h\x1b[?25l")
+            while True:
+                size = shutil.get_terminal_size()
+                rows = max(1, size.lines - 3)
+                width = max(1, size.columns - 1)
+                top = min(top, max(0, len(lines) - rows))
+                max_left = max(0, longest - width)
+                left = min(left, max_left)
+                sys.stdout.write("\x1b[H\x1b[2K" + terminal_slice(title, 0, width) + "\r\n")
+                sys.stdout.write("\x1b[2K" + terminal_slice(controls, 0, width) + "\r\n")
+                for index in range(top, top + rows):
+                    line = terminal_slice(lines[index], left, width) if index < len(lines) else ""
+                    color = colors[index] if index < len(lines) else 0
+                    sys.stdout.write(f"\x1b[2K\x1b[{color}m{line}\x1b[0m\r\n")
+                footer = f"Lines {top + 1}-{min(top + rows, len(lines))}/{len(lines)}  Column {left + 1}"
+                sys.stdout.write("\x1b[2K" + footer[:width])
+                sys.stdout.flush()
+                key = read_key()
+                if key in ("\x1b", "q", "Q"):
+                    return
+                if key == "\x03":
+                    raise KeyboardInterrupt
+                if key in ("\x00", "\xe0"):
+                    key = read_key()
+                    if key == "H":
+                        top = max(0, top - 1)
+                    elif key == "P":
+                        top = min(max(0, len(lines) - rows), top + 1)
+                    elif key == "I":
+                        top = max(0, top - rows)
+                    elif key == "Q":
+                        top = min(max(0, len(lines) - rows), top + rows)
+                    elif key == "G":
+                        top = left = 0
+                    elif key == "O":
+                        top = max(0, len(lines) - rows)
+                    elif key == "K":
+                        left = max(0, left - 8)
+                    elif key == "M":
+                        left = min(max_left, left + 8)
+        finally:
+            sys.stdout.write("\x1b[0m\x1b[?25h\x1b[?1049l")
+            sys.stdout.flush()
 
 
 class GitSvn:
@@ -414,6 +512,18 @@ class GitSvn:
         save_section()
         return sections
 
+    def snapshot_sections(self, snapshot):
+        sections = self.patch_sections(snapshot.patch)
+        for value, properties in snapshot.empty_properties.items():
+            value = value.replace("\\", "/")
+            embedded = self.patch_sections(base64.b64decode(properties, validate=True)).get(value)
+            if embedded is not None:
+                item, lines = sections.get(value, ("modified", ()))
+                if b"Property changes on:" in lines:
+                    lines = lines[:lines.index(b"Property changes on:")]
+                sections[value] = (item, lines + embedded[1])
+        return sections
+
     def unsaved_changes(self, changes):
         if self.branch not in self.state["heads"]:
             return {entry.path for entry in changes}
@@ -423,15 +533,7 @@ class GitSvn:
             if path is None:
                 raise GitSvnError(f"Snapshot does not exist: {self.branch}/{head}")
             snapshot = self.load_snapshot(path)
-            sections = self.patch_sections(snapshot.patch)
-            for value, properties in snapshot.empty_properties.items():
-                value = value.replace("\\", "/")
-                embedded = self.patch_sections(base64.b64decode(properties, validate=True)).get(value)
-                if embedded is not None:
-                    item, lines = sections.get(value, ("modified", ()))
-                    if b"Property changes on:" in lines:
-                        lines = lines[:lines.index(b"Property changes on:")]
-                    sections[value] = (item, lines + embedded[1])
+            sections = self.snapshot_sections(snapshot)
         except (GitSvnError, OSError, ValueError) as error:
             raise GitSvnError(f"Cannot compare status with current head: {error}") from error
         metadata = {entry["path"].replace("\\", "/"): entry for entry in snapshot.entries}
@@ -605,6 +707,48 @@ class GitSvn:
         if not paths:
             print(f"No snapshots in {branch}.")
         return paths
+
+    def inspect(self):
+        if self.branch not in self.state["heads"]:
+            print(f"No saved head on branch {self.branch}. Use gitsvn commit first.")
+            return
+        head = self.state["heads"][self.branch]
+        try:
+            path = next((path for path in self.history(self.branch) if path.stem == head), None)
+            if path is None:
+                raise GitSvnError(f"Snapshot does not exist: {self.branch}/{head}")
+            snapshot = self.load_snapshot(path)
+            sections = self.snapshot_sections(snapshot)
+        except (GitSvnError, OSError, ValueError) as error:
+            raise GitSvnError(f"Cannot inspect current head: {error}") from error
+
+        metadata = {entry["path"].replace("\\", "/"): entry for entry in snapshot.entries}
+        for value, details in metadata.items():
+            item = "modified" if details["item"] == "normal" else details["item"]
+            sections[value] = (item, sections.get(value, (item, ()))[1])
+        if not sections:
+            print("No changed files in current version.")
+            return
+        paths = sorted(sections)
+        symbols = {"added": "A", "modified": "M", "deleted": "D"}
+        labels = [terminal_text(f"{symbols[sections[value][0]]}  {value}" +
+                               ("/" if metadata.get(value, {}).get("kind") == "dir" else ""))
+                  for value in paths]
+        title = terminal_text(f"Inspect {self.branch}: {self.snapshot_label(path)} (current version)")
+        while True:
+            selected = pick_item(labels, title, "file")
+            if selected is None:
+                return
+            value = paths[selected]
+            item, contents = sections[value]
+            details = metadata.get(value, {})
+            kind = "directory" if details.get("kind") == "dir" else "file"
+            lines = [f"{item.capitalize()} {kind}: {value}", ""]
+            lines.extend(line.decode("utf-8-sig", errors="replace").rstrip("\r\n")
+                         for line in contents)
+            if not contents:
+                lines.append("No text hunks; this snapshot records the path change only.")
+            view_diff(f"{value} | {self.branch}/{snapshot.name}", lines)
 
     def create_branch(self, name):
         directory = self.branch_path(name)
@@ -1093,6 +1237,7 @@ def parser():
     finalize.add_argument("--latest", action="store_true", help="Export the branch's saved snapshot")
     log = commands.add_parser("log", help="List snapshot timestamps and messages")
     log.add_argument("branch", nargs="?")
+    commands.add_parser("inspect", help="Browse file diffs in the current branch's saved head")
     revert = commands.add_parser("revert", help="Choose a saved snapshot to restore")
     revert.add_argument("branch", nargs="?")
     revert.add_argument("snapshot", nargs="?", help="Snapshot ID; omit to open the snapshot picker")
@@ -1122,6 +1267,8 @@ def main(argv=None):
             app.finalize(arguments.description, arguments.ticket, arguments.latest)
         elif arguments.command == "log":
             app.list_history(arguments.branch or app.branch)
+        elif arguments.command == "inspect":
+            app.inspect()
         elif arguments.command == "revert":
             app.select_restore(arguments.branch or app.branch, arguments.snapshot)
         elif arguments.command == "pull":

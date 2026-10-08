@@ -95,6 +95,7 @@ gitsvn add src\Example.cs
 gitsvn commit -m "Fix input validation"
 
 gitsvn log
+gitsvn inspect
 gitsvn finalize FixInputValidation
 gitsvn switch trunk
 ```
@@ -115,6 +116,7 @@ Use `gitsvn [options] <command>`:
 | `add PATH...` | Schedule new files or folders with SVN. Paths are relative to the working-copy root. |
 | `commit -m MESSAGE` | Save a timestamped patch, message, and snapshot metadata in the current branch folder. |
 | `log [BRANCH]` | List saved versions with readable dates, times, messages, and snapshot IDs. Defaults to the current branch. |
+| `inspect` | Choose a changed path from the current saved version and view its patch in a read-only terminal viewer. |
 | `revert [BRANCH] [SNAPSHOT]` | Restore a saved version and select its branch. Omit the snapshot ID to open the snapshot picker; the branch defaults to the current branch. |
 | `finalize DESCRIPTION [TICKET]` | Save a normal commit in the ticket folder and export a named patch directly into the patch root. The ticket defaults to the current branch. |
 | `pull` | Save pending changes for recovery, then run SVN update at the working-copy root, excluding externals. |
@@ -135,6 +137,8 @@ gitsvn pull
 `gitsvn revert` uses the same controls to choose a snapshot from the current branch; `gitsvn revert 12345` chooses from that branch. Each entry shows its date, time, message, and snapshot ID. The branch's **saved head** is marked and selected initially; if none is recorded, the newest snapshot is selected. Cancelling leaves your work and history untouched. After restoring, the selected snapshot becomes the branch's head, even when the recovery autosave has a newer timestamp.
 
 `log` shows local dates and times as `DD.MM.YYYY HH:MM:SS`. The snapshot ID appears in brackets after the message; use that exact ID with `revert`. The branch's saved head is marked **`(current version)`**, even when a newer recovery autosave appears above it. Dates come from generated snapshot names, or the file's last-modified time for older imported patches. Restoring an older version makes it the branch's saved head for future switches.
+
+`gitsvn inspect` lists the changed paths in that **current version**, including properties and empty files or directories. It reads the saved head, so newer recovery autosaves and edits made since that commit do not appear. Use **Up/Down** and **Enter** to pick a path. The read-only viewer shows its patch hunks with their surrounding context; it does not load the entire file. Additions are green, deletions red, and hunk headers cyan. Use **Up/Down**, **PgUp/PgDn**, or **Home/End** to scroll, and **Left/Right** to view long lines. **Esc** or **q** returns to the path list; pressing it again there quits. In an unsupported terminal or with redirected input/output, a numbered picker prints the selected diff without colors and repeats until **q** or end of input. Inspection leaves your working copy and saved history untouched.
 
 `status` uses the same change filter as branch snapshots and switching. It includes current tracked edits, including changes made since the last commit, and excludes unversioned files, SVN-ignored files, externals, and `ignore-on-commit` edits. Add new files with `gitsvn add` to include them. Rows use **A** for additions, **M** for text or property modifications, and **D** for deletions; conflicts and missing files remain visible. The status letters keep their colors: A is green, M yellow, and D red. Filenames are white when their changes are included in the saved head and red when their current changes differ from that head. Colors appear in supported terminals, while redirected output stays plain text.
 
