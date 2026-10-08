@@ -461,14 +461,13 @@ class GitSvn:
             for entry in changes:
                 symbol = ("C" if entry.props == "conflicted" or entry.tree_conflicted
                           else symbols.get(entry.item, "?"))
-                marker = " (*)" if entry.path in unsaved else " "
-                line = f"{symbol}{marker} {entry.path}"
+                line = f"{symbol}  {entry.path}"
                 if enabled:
                     color = 32 if symbol == "A" else 31 if symbol in ("D", "C", "!", "~") else 33
-                    line = f"\x1b[{color}m{line}\x1b[0m"
+                    filename_color = 31 if entry.path in unsaved else 37
+                    line = (f"\x1b[{color}m{symbol}\x1b[0m  "
+                            f"\x1b[{filename_color}m{entry.path}\x1b[0m")
                 print(line)
-        if unsaved:
-            print("(*) = changes not included in current head")
 
     def capture(self, entries):
         changes = self.changes(entries)

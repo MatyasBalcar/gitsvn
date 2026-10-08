@@ -106,6 +106,10 @@ class GitSvnIntegrationTests(unittest.TestCase):
                 entry.find("wc-status").get("item")
                 for entry in document.findall(".//entry")}
 
+    def unsaved_paths(self):
+        app = GitSvn(self.wc, self.patches, self.state)
+        return app.unsaved_changes(app.changes(app.entries()))
+
     def tree_contents(self, root):
         if not root.exists():
             return {}
@@ -180,17 +184,18 @@ class GitSvnIntegrationTests(unittest.TestCase):
         self.assertEqual(result.stdout.splitlines()[0], "On branch 18814")
         self.assertEqual(set(result.stdout.splitlines()[1:]),
                          {"A  newdir", "A  newdir/added.txt", "D  removed.txt",
-                          "M  story.txt", "M  properties.txt", "M (*) later.txt",
-                          "(*) = changes not included in current head"})
+                          "M  story.txt", "M  properties.txt", "M  later.txt"})
         self.assertNotIn("\x1b", result.stdout)
         output = io.StringIO()
         with patch("main.ansi_output") as terminal, patch("main.sys.stdout", output):
             terminal.return_value.__enter__.return_value = True
             GitSvn(self.wc, self.patches, self.state).status()
-        self.assertIn("\x1b[32mA  newdir/added.txt\x1b[0m", output.getvalue())
-        self.assertIn("\x1b[33mM  story.txt\x1b[0m", output.getvalue())
-        self.assertIn("\x1b[33mM (*) later.txt\x1b[0m", output.getvalue())
-        self.assertIn("\x1b[31mD  removed.txt\x1b[0m", output.getvalue())
+        self.assertIn("\x1b[32mA\x1b[0m  \x1b[37mnewdir/added.txt\x1b[0m", output.getvalue())
+        self.assertIn("\x1b[33mM\x1b[0m  \x1b[37mstory.txt\x1b[0m", output.getvalue())
+        self.assertIn("\x1b[33mM\x1b[0m  \x1b[31mlater.txt\x1b[0m", output.getvalue())
+        self.assertIn("\x1b[31mD\x1b[0m  \x1b[37mremoved.txt\x1b[0m", output.getvalue())
+        self.assertNotIn("(*)", output.getvalue())
+        self.assertNotIn("changes not included", output.getvalue())
         self.assertNotIn("ignored.txt", output.getvalue())
         self.assertEqual(self.tree_contents(self.state), state_before)
         self.assertEqual(self.tree_contents(self.patches), patches_before)
@@ -231,16 +236,15 @@ class GitSvnIntegrationTests(unittest.TestCase):
         result = self.cli("status")
 
         self.assertEqual(set(result.stdout.splitlines()[1:]),
-                         {"! (*) removed.txt", "A (*) binary.dat", "A (*) copied.txt",
-                          "(*) = changes not included in current head"})
+                         {"!  removed.txt", "A  binary.dat", "A  copied.txt"})
         self.assertEqual(self.tree_contents(self.state), state_before)
         self.assertEqual(self.tree_contents(self.patches), patches_before)
         output = io.StringIO()
         with patch("main.ansi_output") as terminal, patch("main.sys.stdout", output):
             terminal.return_value.__enter__.return_value = True
             GitSvn(self.wc, self.patches, self.state).status()
-        self.assertIn("\x1b[32mA (*) binary.dat\x1b[0m", output.getvalue())
-        self.assertIn("\x1b[31m! (*) removed.txt\x1b[0m", output.getvalue())
+        self.assertIn("\x1b[32mA\x1b[0m  \x1b[31mbinary.dat\x1b[0m", output.getvalue())
+        self.assertIn("\x1b[31m!\x1b[0m  \x1b[31mremoved.txt\x1b[0m", output.getvalue())
 
     def test_status_marks_every_visible_change_without_a_recorded_head(self):
         self.new_branch()
@@ -257,8 +261,8 @@ class GitSvnIntegrationTests(unittest.TestCase):
         patches_before = self.tree_contents(self.patches)
 
         self.assertEqual(self.cli("status").stdout,
-                         "On branch 18814\nA (*) new.txt\nD (*) removed.txt\nM (*) story.txt\n"
-                         "(*) = changes not included in current head\n")
+                         "On branch 18814\nA  new.txt\nD  removed.txt\nM  story.txt\n")
+        self.assertEqual(self.unsaved_paths(), {"new.txt", "removed.txt", "story.txt"})
         self.assertEqual(self.tree_contents(self.state), state_before)
         self.assertEqual(self.tree_contents(self.patches), patches_before)
 
@@ -267,16 +271,18 @@ class GitSvnIntegrationTests(unittest.TestCase):
         self.write("story.txt", "saved work\n")
         self.commit("first work")
         self.assertEqual(self.cli("status").stdout, "On branch 18814\nM  story.txt\n")
+        self.assertEqual(self.unsaved_paths(), set())
         self.write("story.txt", "further work\n")
         self.write("new.txt", "new work\n")
         self.cli("add", "new.txt")
 
         self.assertEqual(self.cli("status").stdout,
-                         "On branch 18814\nA (*) new.txt\nM (*) story.txt\n"
-                         "(*) = changes not included in current head\n")
+                         "On branch 18814\nA  new.txt\nM  story.txt\n")
+        self.assertEqual(self.unsaved_paths(), {"new.txt", "story.txt"})
         self.commit("include further work")
         self.assertEqual(self.cli("status").stdout,
                          "On branch 18814\nA  new.txt\nM  story.txt\n")
+        self.assertEqual(self.unsaved_paths(), set())
         self.svn("revert", "story.txt")
         self.assertEqual(self.cli("status").stdout, "On branch 18814\nA  new.txt\n")
         self.svn("revert", "new.txt")
@@ -292,10 +298,11 @@ class GitSvnIntegrationTests(unittest.TestCase):
         self.assertNotEqual(self.snapshots("18814")[-1].stem, first)
 
         self.assertEqual(self.cli("status").stdout, "On branch 18814\nM  story.txt\n")
+        self.assertEqual(self.unsaved_paths(), set())
         self.write("story.txt", "recovery version\n")
         self.assertEqual(self.cli("status").stdout,
-                         "On branch 18814\nM (*) story.txt\n"
-                         "(*) = changes not included in current head\n")
+                         "On branch 18814\nM  story.txt\n")
+        self.assertEqual(self.unsaved_paths(), {"story.txt"})
 
     def test_status_compares_property_values_and_header_like_payloads(self):
         self.new_branch()
@@ -305,13 +312,14 @@ class GitSvnIntegrationTests(unittest.TestCase):
         self.commit("text and property values")
         self.assertEqual(self.cli("status").stdout,
                          "On branch 18814\nM  .\nM  properties.txt\nM  story.txt\n")
+        self.assertEqual(self.unsaved_paths(), set())
         self.write("story.txt", "++ value: changed\nIndex: source text\n")
         self.svn("propset", "custom:note", "++ value: changed", "properties.txt")
         self.svn("propset", "custom:dir", "changed directory property", ".")
 
         self.assertEqual(self.cli("status").stdout,
-                         "On branch 18814\nM (*) .\nM (*) properties.txt\nM (*) story.txt\n"
-                         "(*) = changes not included in current head\n")
+                         "On branch 18814\nM  .\nM  properties.txt\nM  story.txt\n")
+        self.assertEqual(self.unsaved_paths(), {".", "properties.txt", "story.txt"})
 
     def test_status_compares_added_files_directories_and_empty_paths(self):
         self.new_branch()
@@ -326,15 +334,16 @@ class GitSvnIntegrationTests(unittest.TestCase):
         self.assertEqual(set(self.cli("status").stdout.splitlines()[1:]),
                          {"A  newdir", "A  newdir/file.txt", "A  newdir/empty.txt",
                           "A  newdir/emptydir", "A  newdir/plainempty", "M  properties.txt"})
+        self.assertEqual(self.unsaved_paths(), set())
         self.write("newdir/empty.txt", "no longer empty\n")
         self.svn("propset", "custom:flag", "changed directory property", "newdir/emptydir")
 
         self.assertEqual(set(self.cli("status").stdout.splitlines()[1:]),
-                         {"A (*) newdir", "A  newdir/file.txt", "A (*) newdir/empty.txt",
-                          "A (*) newdir/emptydir", "A  newdir/plainempty", "M  properties.txt",
-                          "(*) = changes not included in current head"})
+                         {"A  newdir", "A  newdir/file.txt", "A  newdir/empty.txt",
+                          "A  newdir/emptydir", "A  newdir/plainempty", "M  properties.txt"})
+        self.assertEqual(self.unsaved_paths(), {"newdir", "newdir/empty.txt", "newdir/emptydir"})
         self.commit("updated new paths")
-        self.assertNotIn("*", self.cli("status").stdout)
+        self.assertEqual(self.unsaved_paths(), set())
 
     def test_status_compares_empty_deletions_and_recursive_directory_deletions(self):
         self.write("tracked/nested/file.txt", "inside directory\n")
@@ -352,24 +361,26 @@ class GitSvnIntegrationTests(unittest.TestCase):
         self.assertIn("D  emptybase\n", result)
         self.assertIn("D  emptybase.txt\n", result)
         self.assertIn("D  removed.txt\n", result)
-        self.assertNotIn("*", result)
+        self.assertEqual(self.unsaved_paths(), set())
 
         self.svn("revert", "--depth", "infinity", "tracked")
         self.write("tracked/nested/file.txt", "edited instead of deleted\n")
-        self.assertIn("M (*) tracked/nested/file.txt\n", self.cli("status").stdout)
+        self.assertIn("M  tracked/nested/file.txt\n", self.cli("status").stdout)
+        self.assertEqual(self.unsaved_paths(), {"tracked/nested/file.txt"})
         self.svn("revert", "tracked/nested/file.txt")
         self.svn("delete", "tracked/nested/file.txt", "tracked/empty.txt", "tracked/emptydir")
-        self.assertNotIn("*", self.cli("status").stdout)
+        self.assertEqual(self.unsaved_paths(), set())
 
     def test_status_distinguishes_truncation_and_deletion_with_the_same_text_hunk(self):
         self.new_branch()
         self.write("story.txt", "")
         self.commit("truncate file")
         self.assertEqual(self.cli("status").stdout, "On branch 18814\nM  story.txt\n")
+        self.assertEqual(self.unsaved_paths(), set())
         self.svn("delete", "--force", "story.txt")
         self.assertEqual(self.cli("status").stdout,
-                         "On branch 18814\nD (*) story.txt\n"
-                         "(*) = changes not included in current head\n")
+                         "On branch 18814\nD  story.txt\n")
+        self.assertEqual(self.unsaved_paths(), {"story.txt"})
 
     def test_status_marks_parent_deletion_after_saved_child_deletion(self):
         self.write("tracked/file.txt", "tracked child\n")
@@ -378,10 +389,11 @@ class GitSvnIntegrationTests(unittest.TestCase):
         self.new_branch()
         self.svn("delete", "tracked/file.txt")
         self.commit("delete only the child")
-        self.assertNotIn("*", self.cli("status").stdout)
+        self.assertEqual(self.unsaved_paths(), set())
         self.svn("delete", "tracked")
 
-        self.assertIn("D (*) tracked\n", self.cli("status").stdout)
+        self.assertIn("D  tracked\n", self.cli("status").stdout)
+        self.assertIn("tracked", self.unsaved_paths())
 
     def test_status_compares_truncated_files_and_embedded_empty_file_properties(self):
         self.new_branch()
@@ -393,10 +405,11 @@ class GitSvnIntegrationTests(unittest.TestCase):
         patch_bytes = snapshot_path.read_bytes()
         snapshot_path.write_bytes(patch_bytes.split(b"Property changes on: ", 1)[0])
         self.assertEqual(self.cli("status").stdout, "On branch 18814\nM  story.txt\n")
+        self.assertEqual(self.unsaved_paths(), set())
         self.svn("propset", "custom:flag", "changed empty-file property", "story.txt")
         self.assertEqual(self.cli("status").stdout,
-                         "On branch 18814\nM (*) story.txt\n"
-                         "(*) = changes not included in current head\n")
+                         "On branch 18814\nM  story.txt\n")
+        self.assertEqual(self.unsaved_paths(), {"story.txt"})
 
     def test_status_normalizes_revision_labels_without_ignoring_line_ending_edits(self):
         self.new_branch()
@@ -405,12 +418,13 @@ class GitSvnIntegrationTests(unittest.TestCase):
         snapshot_path = self.patches / "18814" / f"{snapshot}.patch"
         snapshot_path.write_bytes(snapshot_path.read_bytes().replace(b"(revision 1)", b"(revision 42)"))
         self.assertEqual(self.cli("status").stdout, "On branch 18814\nM  story.txt\n")
+        self.assertEqual(self.unsaved_paths(), set())
         content = (self.wc / "story.txt").read_bytes()
         (self.wc / "story.txt").write_bytes(content.replace(b"\r\n", b"\n")
                                            if b"\r\n" in content else content.replace(b"\n", b"\r\n"))
         self.assertEqual(self.cli("status").stdout,
-                         "On branch 18814\nM (*) story.txt\n"
-                         "(*) = changes not included in current head\n")
+                         "On branch 18814\nM  story.txt\n")
+        self.assertEqual(self.unsaved_paths(), {"story.txt"})
 
     def test_status_compares_legacy_patches_without_metadata(self):
         self.new_branch()
@@ -424,14 +438,15 @@ class GitSvnIntegrationTests(unittest.TestCase):
         snapshot_path = self.patches / "18814" / f"{snapshot}.patch"
         snapshot_path.with_suffix(".json").unlink()
         snapshot_path.write_bytes(b"\xef\xbb\xbf" + snapshot_path.read_bytes())
-        self.assertNotIn("*", self.cli("status").stdout)
+        self.assertEqual(self.unsaved_paths(), set())
         self.write("story.txt", "further legacy edit\n")
         self.svn("propset", "custom:flag", "new property", "properties.txt")
         result = self.cli("status").stdout
-        self.assertIn("M (*) story.txt\n", result)
-        self.assertIn("M (*) properties.txt\n", result)
+        self.assertIn("M  story.txt\n", result)
+        self.assertIn("M  properties.txt\n", result)
         self.assertIn("A  newdir\n", result)
         self.assertIn("A  empty.txt\n", result)
+        self.assertEqual(self.unsaved_paths(), {"story.txt", "properties.txt"})
 
     def test_status_compares_recursive_legacy_deletion_without_parent_metadata(self):
         self.write("tracked/nested/file.txt", "legacy directory\n")
@@ -441,7 +456,7 @@ class GitSvnIntegrationTests(unittest.TestCase):
         self.svn("delete", "tracked")
         snapshot = self.commit("legacy directory deletion")
         (self.patches / "18814" / f"{snapshot}.json").unlink()
-        self.assertNotIn("*", self.cli("status").stdout)
+        self.assertEqual(self.unsaved_paths(), set())
 
     def test_status_reads_head_once_and_does_not_capture_unsupported_changes(self):
         self.new_branch()
@@ -456,8 +471,8 @@ class GitSvnIntegrationTests(unittest.TestCase):
             app.status()
         load.assert_called_once()
         self.assertEqual(output.getvalue(),
-                         "On branch 18814\nA (*) copied.txt\nM  story.txt\n"
-                         "(*) = changes not included in current head\n")
+                         "On branch 18814\nA  copied.txt\nM  story.txt\n")
+        self.assertEqual(self.unsaved_paths(), {"copied.txt"})
 
     def test_status_marks_binary_edits_and_data_kept_inside_saved_deletions(self):
         self.new_branch()
@@ -468,11 +483,11 @@ class GitSvnIntegrationTests(unittest.TestCase):
         self.write("removed.txt", "local data inside deleted path\n")
         files_before = self.tree_contents(self.wc)
         self.assertEqual(self.cli("status").stdout,
-                         "On branch 18814\nD (*) removed.txt\nM (*) story.txt\n"
-                         "(*) = changes not included in current head\n")
+                         "On branch 18814\nD  removed.txt\nM  story.txt\n")
+        self.assertEqual(self.unsaved_paths(), {"removed.txt", "story.txt"})
         self.assertEqual(self.tree_contents(self.wc), files_before)
 
-    def test_status_keeps_text_and_property_conflicts_visible_and_starred(self):
+    def test_status_keeps_text_and_property_conflicts_visible_and_unsaved(self):
         self.svn("propset", "custom:flag", "base property", "properties.txt")
         self.svn("commit", "-m", "property fixture")
         self.new_branch()
@@ -491,8 +506,8 @@ class GitSvnIntegrationTests(unittest.TestCase):
         files_before = self.tree_contents(self.wc)
 
         self.assertEqual(self.cli("status").stdout,
-                         "On branch 18814\nC (*) properties.txt\nC (*) story.txt\n"
-                         "(*) = changes not included in current head\n")
+                         "On branch 18814\nC  properties.txt\nC  story.txt\n")
+        self.assertEqual(self.unsaved_paths(), {"properties.txt", "story.txt"})
         self.assertEqual(self.tree_contents(self.state), state_before)
         self.assertEqual(self.tree_contents(self.patches), patches_before)
         self.assertEqual(ET.canonicalize(self.svn("status", "--xml").stdout), status_before)
@@ -510,6 +525,7 @@ class GitSvnIntegrationTests(unittest.TestCase):
         self.write("external/file.txt", "external edit\n")
         files_before = self.tree_contents(self.wc)
         self.assertEqual(self.cli("status").stdout, "On branch 18814\nM  story.txt\n")
+        self.assertEqual(self.unsaved_paths(), set())
         self.assertEqual(self.tree_contents(self.wc), files_before)
 
     def test_status_reports_invalid_recorded_head_without_using_newest_snapshot(self):
@@ -1462,7 +1478,8 @@ class GitSvnIntegrationTests(unittest.TestCase):
         self.assertEqual(story.find("wc-status").get("tree-conflicted"), "true")
         patches_before = self.tree_contents(self.patches)
         state_before = self.tree_contents(self.state)
-        self.assertIn("C (*) story.txt\n", self.cli("status").stdout)
+        self.assertIn("C  story.txt\n", self.cli("status").stdout)
+        self.assertIn("story.txt", self.unsaved_paths())
         self.cli("switch", "18814", success=False)
         self.assertEqual(self.read("story.txt"), "local edit before upstream deletion\n")
         self.assertEqual(self.tree_contents(self.patches), patches_before)
