@@ -20,6 +20,89 @@ class GitSvnError(Exception):
     pass
 
 
+DEFAULT_SVN_ROOT = Path(r"D:\Elektlabs")
+DEFAULT_PATCH_ROOT = Path(r"D:\Patches")
+
+
+def configuration_path(state_dir=None, config_path=None):
+    if config_path is not None:
+        return Path(config_path).resolve()
+    directory = (Path(state_dir).resolve() if state_dir is not None
+                 else Path(__file__).resolve().parent / ".gitsvn")
+    return directory / "config.json"
+
+
+def load_config(path, required=False):
+    if required and not path.is_file():
+        raise GitSvnError(f"Config file does not exist: {path}")
+    config = {"autosave": True}
+    if path.exists():
+        try:
+            settings = json.loads(path.read_text(encoding="utf-8-sig"))
+            if not isinstance(settings, dict) or not isinstance(settings.get("autosave", True), bool):
+                raise ValueError("autosave must be true or false")
+            for key in ("svn_root", "patch_root", "state_dir"):
+                if key in settings and (not isinstance(settings[key], str) or not settings[key].strip()):
+                    raise ValueError(f"{key} must be a nonempty path string")
+            config.update(settings)
+        except (ValueError, TypeError) as error:
+            raise GitSvnError(f"Invalid config file: {path}: {error}") from error
+    return config
+
+
+def resolve_path(value, key, default, config, config_path):
+    if value is not None:
+        return Path(value).resolve()
+    if key not in config:
+        return Path(default).resolve()
+    path = Path(config[key])
+    if not path.is_absolute():
+        path = config_path.parent / path
+    return path.resolve()
+
+
+def save_json(path, value):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent,
+                                         delete=False) as handle:
+            temporary = Path(handle.name)
+            json.dump(value, handle, indent=2)
+            handle.write("\n")
+        os.replace(temporary, path)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
+def svn_output(directory, *arguments):
+    environment = os.environ.copy()
+    environment["LC_ALL"] = "C"
+    try:
+        result = subprocess.run(["svn", *arguments], cwd=directory,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                env=environment, check=False)
+    except FileNotFoundError as error:
+        raise GitSvnError("SVN or the working-copy directory was not found.") from error
+    if result.returncode:
+        message = result.stderr.decode("utf-8", errors="replace").strip()
+        raise GitSvnError(f"svn {arguments[0]} failed: {message}")
+    return result.stdout
+
+
+def working_copy_root(directory):
+    output = svn_output(directory, "info", "--show-item", "wc-root", "--", ".")
+    return Path(output.decode("utf-8").strip()).resolve()
+
+
+def detect_working_copy_root(directory):
+    for parent in (directory, *directory.parents):
+        if (parent / ".svn").is_dir():
+            return working_copy_root(parent)
+    raise GitSvnError("Current directory is not inside an SVN working copy.")
+
+
 @dataclass
 class Entry:
     path: str
@@ -151,29 +234,13 @@ def pick_branch(names, current):
 
 
 class GitSvn:
-    def __init__(self, svn_root=None, patch_root=None, state_dir=None, config_path=None):
-        default_state_dir = Path(__file__).resolve().parent / ".gitsvn"
-        if config_path is not None:
-            self.config_path = Path(config_path).resolve()
-            if not self.config_path.is_file():
-                raise GitSvnError(f"Config file does not exist: {self.config_path}")
-        else:
-            config_dir = Path(state_dir).resolve() if state_dir is not None else default_state_dir
-            self.config_path = config_dir / "config.json"
-        self.config = {"autosave": True}
-        if self.config_path.exists():
-            try:
-                config = json.loads(self.config_path.read_text(encoding="utf-8-sig"))
-                if not isinstance(config, dict) or not isinstance(config.get("autosave", True), bool):
-                    raise ValueError("autosave must be true or false")
-                for key in ("svn_root", "patch_root", "state_dir"):
-                    if key in config and (not isinstance(config[key], str) or not config[key].strip()):
-                        raise ValueError(f"{key} must be a nonempty path string")
-                self.config.update(config)
-            except (ValueError, TypeError) as error:
-                raise GitSvnError(f"Invalid config file: {self.config_path}: {error}") from error
-        self.svn_root = self.configured_path(svn_root, "svn_root", Path(r"D:\Elektlabs"))
-        self.patch_root = self.configured_path(patch_root, "patch_root", Path(r"D:\Patches"))
+    def __init__(self, svn_root=None, patch_root=None, state_dir=None, config_path=None, *, _config=None):
+        self.config_path = configuration_path(state_dir, config_path)
+        # Init validates chosen settings before writing a new config file.
+        self.config = (load_config(self.config_path, required=config_path is not None)
+                       if _config is None else {"autosave": True, **_config})
+        self.svn_root = self.configured_path(svn_root, "svn_root", DEFAULT_SVN_ROOT)
+        self.patch_root = self.configured_path(patch_root, "patch_root", DEFAULT_PATCH_ROOT)
         self.state_dir = self.configured_path(state_dir, "state_dir", self.config_path.parent)
         if self.patch_root.is_relative_to(self.svn_root):
             raise GitSvnError("Patch storage must be outside the SVN working copy.")
@@ -205,48 +272,20 @@ class GitSvn:
                 raise GitSvnError(f"Invalid state file: {self.state_path}: {error}") from error
 
     def configured_path(self, value, key, default):
-        if value is not None:
-            return Path(value).resolve()
-        if key not in self.config:
-            return Path(default).resolve()
-        path = Path(self.config[key])
-        if not path.is_absolute():
-            path = self.config_path.parent / path
-        return path.resolve()
+        return resolve_path(value, key, default, self.config, self.config_path)
 
     @property
     def branch(self):
         return self.state["branch"]
 
     def save_state(self):
-        self.state_dir.mkdir(parents=True, exist_ok=True)
-        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=self.state_dir,
-                                         delete=False) as handle:
-            temporary = Path(handle.name)
-            json.dump(self.state, handle, indent=2)
-            handle.write("\n")
-        try:
-            os.replace(temporary, self.state_path)
-        finally:
-            temporary.unlink(missing_ok=True)
+        save_json(self.state_path, self.state)
 
     def svn(self, *arguments):
-        environment = os.environ.copy()
-        environment["LC_ALL"] = "C"
-        try:
-            result = subprocess.run(["svn", *arguments], cwd=self.svn_root,
-                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                    env=environment, check=False)
-        except FileNotFoundError as error:
-            raise GitSvnError("SVN or the working-copy directory was not found.") from error
-        if result.returncode:
-            message = result.stderr.decode("utf-8", errors="replace").strip()
-            raise GitSvnError(f"svn {arguments[0]} failed: {message}")
-        return result.stdout
+        return svn_output(self.svn_root, *arguments)
 
     def verify_working_copy(self):
-        actual = self.svn("info", "--show-item", "wc-root", "--", ".")
-        if Path(actual.decode("utf-8").strip()).resolve() != self.svn_root:
+        if working_copy_root(self.svn_root) != self.svn_root:
             raise GitSvnError("--svn-root must point to the SVN working-copy root.")
 
     def branch_path(self, name):
@@ -917,6 +956,123 @@ class GitSvn:
             raise GitSvnError("SVN update produced conflicts. Resolve them before switching branches.")
 
 
+def validate_folder(path):
+    for parent in (path, *path.parents):
+        if parent.exists():
+            if not parent.is_dir():
+                raise GitSvnError(f"Not a folder: {parent}")
+            return
+    raise GitSvnError(f"Drive or parent folder does not exist: {path}")
+
+
+def prompt_path(label, default, validate):
+    while True:
+        choice = input(f"{label} [{default}]: ").strip()
+        try:
+            if len(choice) >= 2 and choice[0] == choice[-1] and choice[0] in ("'", '"'):
+                choice = choice[1:-1]
+            path = Path(choice).resolve() if choice else default
+            validate(path)
+            return path
+        except (GitSvnError, OSError, ValueError, ET.ParseError) as error:
+            print(f"Invalid {label.lower()}: {error}")
+
+
+def prompt_autosave(default):
+    while True:
+        choice = input(f"Autosave when switching (true/false) [{str(default).lower()}]: ").strip().lower()
+        if not choice:
+            return default
+        if choice in ("true", "yes", "y"):
+            return True
+        if choice in ("false", "no", "n"):
+            return False
+        print("Enter true or false (yes/no also works).")
+
+
+def register_path():
+    installer = Path(__file__).resolve().parent / "install.ps1"
+    result = subprocess.run(["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass",
+                             "-File", str(installer)], stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, check=False)
+    if result.returncode:
+        message = result.stderr.decode(errors="replace").strip()
+        raise GitSvnError(message or f"Installer exited with code {result.returncode}.")
+    if result.stdout:
+        print(result.stdout.decode(errors="replace").rstrip())
+
+
+def initialize(arguments):
+    program_dir = Path(__file__).resolve().parent
+    for name in ("main.py", "gitsvn.cmd", "install.ps1"):
+        if not (program_dir / name).is_file():
+            raise GitSvnError(f"Missing gitsvn file: {program_dir / name}")
+    for name in ("python", "svn"):
+        if shutil.which(name) is None:
+            raise GitSvnError(f"{name} must be available on PATH before initialization.")
+    config_path = configuration_path(arguments.state_dir, arguments.config)
+    if config_path.name.casefold() == "state.json":
+        raise GitSvnError("state.json is reserved for branch state; choose a separate config file.")
+    validate_folder(config_path.parent)
+    config = load_config(config_path)
+    default_root = DEFAULT_SVN_ROOT
+    if arguments.svn_root is None and "svn_root" not in config:
+        try:
+            default_root = detect_working_copy_root(Path.cwd())
+        except GitSvnError:
+            pass
+    defaults = {
+        "svn_root": resolve_path(arguments.svn_root, "svn_root", default_root, config, config_path),
+        "patch_root": resolve_path(arguments.patch_root, "patch_root", DEFAULT_PATCH_ROOT,
+                                   config, config_path),
+        "state_dir": resolve_path(arguments.state_dir, "state_dir", config_path.parent,
+                                  config, config_path),
+    }
+
+    def validate_root(path):
+        validate_folder(path)
+        actual = working_copy_root(path)
+        if actual != path:
+            raise GitSvnError(f"Select the SVN working-copy root: {actual}")
+
+    def validate_patch(path):
+        validate_folder(path)
+        if path.is_relative_to(Path(config["svn_root"])):
+            raise GitSvnError("Patch storage must be outside the SVN working copy.")
+
+    def validate_state(path):
+        validate_folder(path)
+        # Reuse the normal workspace/state guards without writing any files.
+        GitSvn(config_path=config_path, _config={**config, "state_dir": str(path)})
+
+    print("Initialize gitsvn. Press Enter to keep each default; Ctrl+C cancels.")
+    print(f"Configuration: {config_path}")
+    try:
+        config["svn_root"] = str(prompt_path("SVN working-copy root", defaults["svn_root"], validate_root))
+        config["patch_root"] = str(prompt_path("Patch folder", defaults["patch_root"], validate_patch))
+        config["state_dir"] = str(prompt_path("State folder", defaults["state_dir"], validate_state))
+        config["autosave"] = prompt_autosave(config["autosave"])
+    except EOFError:
+        print("Initialization cancelled.")
+        return 0
+
+    Path(config["patch_root"]).mkdir(parents=True, exist_ok=True)
+    Path(config["state_dir"]).mkdir(parents=True, exist_ok=True)
+    save_json(config_path, config)
+    print(f"Saved configuration: {config_path}")
+    if config_path != configuration_path():
+        print(f'Use this configuration with: gitsvn --config "{config_path}" <command>')
+    try:
+        register_path()
+    except (GitSvnError, OSError) as error:
+        raise GitSvnError(
+            f"Configuration saved, but PATH registration failed: {error}\n"
+            f'Retry with: powershell -NoProfile -ExecutionPolicy Bypass -File "{program_dir / "install.ps1"}"'
+        ) from error
+    print("Initialization complete. Open a new terminal to use gitsvn from any directory.")
+    return 0
+
+
 def parser():
     result = argparse.ArgumentParser(prog="gitsvn", description="Local Git-like patch branches for SVN.")
     result.add_argument("--config", help="Settings file; defaults to .gitsvn/config.json beside the program")
@@ -924,6 +1080,7 @@ def parser():
     result.add_argument("--patch-root", help="Patch storage folder; overrides config")
     result.add_argument("--state-dir", help="State folder; also selects config unless --config is supplied")
     commands = result.add_subparsers(dest="command", required=True)
+    commands.add_parser("init", help="Configure folders and autosave, then add gitsvn to user PATH")
     branch = commands.add_parser("branch", help="List branches or initialize a clean-trunk branch")
     branch.add_argument("name", nargs="?")
     switch = commands.add_parser("switch", help="Restore a branch using the autosave setting")
@@ -949,6 +1106,8 @@ def parser():
 def main(argv=None):
     arguments = parser().parse_args(argv)
     try:
+        if arguments.command == "init":
+            return initialize(arguments)
         app = GitSvn(arguments.svn_root, arguments.patch_root, arguments.state_dir, arguments.config)
         if (arguments.command in ("switch", "commit", "revert", "pull", "status", "add") or
                 (arguments.command == "finalize" and not arguments.latest)):

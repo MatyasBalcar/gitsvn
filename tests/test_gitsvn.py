@@ -14,7 +14,7 @@ from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
-from main import GitSvn, GitSvnError, pick_branch
+from main import GitSvn, GitSvnError, main, pick_branch, register_path
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -115,6 +115,244 @@ class GitSvnIntegrationTests(unittest.TestCase):
             return {}
         return {str(path.relative_to(root)): path.read_bytes()
                 for path in root.rglob("*") if path.is_file()}
+
+    def init_program(self):
+        program = self.root / "program with spaces"
+        program.mkdir(exist_ok=True)
+        for name in ("main.py", "gitsvn.cmd", "install.ps1"):
+            shutil.copy2(PROJECT_ROOT / name, program / name)
+        return program
+
+    def init_cli(self, answers, *args, cwd=None, default_root=None, installer_error=None):
+        program = self.init_program()
+        output, errors = io.StringIO(), io.StringIO()
+        previous_dir = Path.cwd()
+        try:
+            os.chdir(cwd or self.root)
+            with patch("main.__file__", str(program / "main.py")), \
+                    patch("main.DEFAULT_SVN_ROOT", default_root or self.wc), \
+                    patch("main.DEFAULT_PATCH_ROOT", self.patches), \
+                    patch("main.sys.stdin", io.StringIO(answers)), \
+                    patch("main.sys.stdout", output), patch("main.sys.stderr", errors), \
+                    patch("main.register_path") as installer:
+                installer.side_effect = installer_error
+                code = main([*map(str, args), "init"])
+        finally:
+            os.chdir(previous_dir)
+        return code, output.getvalue(), errors.getvalue(), installer
+
+    def test_init_detects_checkout_and_creates_default_config_without_snapshots(self):
+        nested = self.wc / "nested"
+        nested.mkdir()
+        status_before = ET.canonicalize(self.svn("status", "--xml").stdout)
+
+        code, output, errors, installer = self.init_cli(
+            "\n" * 4, cwd=nested, default_root=self.root / "unused-fallback")
+
+        self.assertEqual(code, 0, errors)
+        config_path = self.root / "program with spaces" / ".gitsvn" / "config.json"
+        self.assertEqual(json.loads(config_path.read_text(encoding="utf-8")), {
+            "svn_root": str(self.wc), "patch_root": str(self.patches),
+            "state_dir": str(config_path.parent), "autosave": True,
+        })
+        self.assertTrue(self.patches.is_dir())
+        self.assertEqual(self.tree_contents(self.patches), {})
+        self.assertFalse((config_path.parent / "state.json").exists())
+        installer.assert_called_once_with()
+        self.assertIn("Open a new terminal", output)
+        self.assertEqual(ET.canonicalize(self.svn("status", "--xml").stdout), status_before)
+        elsewhere = self.root / "elsewhere"
+        elsewhere.mkdir()
+        status = self.run_process([sys.executable, str(config_path.parent.parent / "main.py"),
+                                   "status"], cwd=elsewhere)
+        self.assertIn("On branch trunk", status.stdout)
+
+    def test_init_uses_builtin_root_when_outside_a_checkout(self):
+        code, output, errors, _ = self.init_cli("\n" * 4)
+        self.assertEqual(code, 0, errors)
+        self.assertIn(f"SVN working-copy root [{self.wc}]", output)
+        config_path = self.root / "program with spaces" / ".gitsvn" / "config.json"
+        self.assertEqual(json.loads(config_path.read_text(encoding="utf-8"))["svn_root"], str(self.wc))
+
+    def test_init_preserves_existing_settings_state_and_branch_history(self):
+        self.configure(svn_root=str(self.wc), patch_root=str(self.patches), state_dir=".",
+                       autosave=False, custom_setting="preserve me")
+        self.new_branch()
+        self.write("story.txt", "saved branch work\n")
+        self.commit("saved work")
+        self.write("story.txt", "unsaved work stays in place\n")
+        state_before = (self.state / "state.json").read_bytes()
+        patches_before = self.tree_contents(self.patches)
+        config_path = self.state / "config.json"
+        for _ in range(2):
+            code, output, errors, installer = self.init_cli("\n" * 4, "--config", config_path)
+            self.assertEqual(code, 0, errors)
+            installer.assert_called_once_with()
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+            self.assertFalse(config["autosave"])
+            self.assertEqual(config["custom_setting"], "preserve me")
+            self.assertEqual(config["state_dir"], str(self.state))
+            self.assertEqual((self.state / "state.json").read_bytes(), state_before)
+            self.assertEqual(self.tree_contents(self.patches), patches_before)
+            self.assertEqual(self.read("story.txt"), "unsaved work stays in place\n")
+            self.assertIn(f'gitsvn --config "{config_path}"', output)
+
+    def test_init_cli_overrides_existing_config_defaults(self):
+        config_path = self.root / "settings" / "project.json"
+        config_path.parent.mkdir()
+        config_path.write_text(json.dumps({
+            "svn_root": "old-wc", "patch_root": "old-patches", "state_dir": "old-state",
+            "autosave": False,
+        }), encoding="utf-8")
+        new_state = self.root / "new-state"
+        new_state.mkdir()
+        # An explicit --config must not read this unrelated configuration.
+        (new_state / "config.json").write_text("{", encoding="utf-8")
+
+        code, _, errors, _ = self.init_cli(
+            "\n" * 4, "--config", config_path, "--svn-root", "wc",
+            "--patch-root", "new-patches", "--state-dir", "new-state")
+
+        self.assertEqual(code, 0, errors)
+        self.assertEqual(json.loads(config_path.read_text(encoding="utf-8")), {
+            "svn_root": str(self.wc), "patch_root": str(self.root / "new-patches"),
+            "state_dir": str(new_state), "autosave": False,
+        })
+        self.assertEqual((new_state / "config.json").read_text(encoding="utf-8"), "{")
+        self.configured_cli(config_path, "status")
+
+    def test_init_accepts_quoted_relative_paths_and_autosave_choice(self):
+        code, _, errors, _ = self.init_cli("'wc'\n\"patch folder\"\n'state folder'\nno\n")
+        self.assertEqual(code, 0, errors)
+        config_path = self.root / "program with spaces" / ".gitsvn" / "config.json"
+        self.assertEqual(json.loads(config_path.read_text(encoding="utf-8")), {
+            "svn_root": str(self.wc), "patch_root": str(self.root / "patch folder"),
+            "state_dir": str(self.root / "state folder"), "autosave": False,
+        })
+        self.assertTrue((self.root / "patch folder").is_dir())
+        self.assertTrue((self.root / "state folder").is_dir())
+
+    def test_init_invalid_paths_and_autosave_are_reprompted(self):
+        not_folder = self.root / "not-a-folder"
+        not_folder.write_text("keep me", encoding="utf-8")
+        forbidden_patch, forbidden_state = self.wc / "patches", self.wc / "state"
+        patch_root, state_dir = self.root / "valid-patches", self.root / "valid-state"
+        answers = "\n".join(map(str, [self.root, self.wc, forbidden_patch, not_folder,
+                                     patch_root, forbidden_state, state_dir, "maybe", "false"])) + "\n"
+
+        code, output, errors, installer = self.init_cli(answers)
+
+        self.assertEqual(code, 0, errors)
+        self.assertIn("Invalid svn working-copy root", output)
+        self.assertIn("outside the SVN working copy", output)
+        self.assertIn("Not a folder", output)
+        self.assertIn("Enter true or false", output)
+        self.assertFalse(forbidden_patch.exists())
+        self.assertFalse(forbidden_state.exists())
+        self.assertEqual(not_folder.read_text(encoding="utf-8"), "keep me")
+        self.assertTrue(patch_root.is_dir())
+        self.assertTrue(state_dir.is_dir())
+        installer.assert_called_once_with()
+
+    def test_init_requires_separate_state_for_changed_workspace_paths(self):
+        self.configure(svn_root=str(self.wc), patch_root=str(self.patches), state_dir=".",
+                       autosave=False)
+        self.new_branch()
+        config_path = self.state / "config.json"
+        state_before = (self.state / "state.json").read_bytes()
+        config_before = config_path.read_bytes()
+        patches_before = self.tree_contents(self.patches)
+        new_patches, new_state = self.root / "new-patches", self.root / "new-state"
+        args = ("--config", config_path, "--patch-root", new_patches)
+
+        code, output, _, installer = self.init_cli("\n" * 3, *args)
+        self.assertEqual(code, 0)
+        self.assertIn("separate --state-dir", output)
+        self.assertIn("Initialization cancelled", output)
+        installer.assert_not_called()
+        self.assertEqual(config_path.read_bytes(), config_before)
+        self.assertFalse(new_patches.exists())
+
+        code, output, errors, installer = self.init_cli(f"\n\n\n{new_state}\n\n", *args)
+        self.assertEqual(code, 0, errors)
+        self.assertIn("separate --state-dir", output)
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+        self.assertEqual(config["state_dir"], str(new_state))
+        self.assertEqual(config["patch_root"], str(new_patches))
+        self.assertEqual((self.state / "state.json").read_bytes(), state_before)
+        self.assertEqual(self.tree_contents(self.patches), patches_before)
+        self.assertFalse((new_state / "state.json").exists())
+        installer.assert_called_once_with()
+
+    def test_init_eof_and_keyboard_interrupt_do_not_save_or_register_path(self):
+        for answers in ("", "\n", "\n\n", "\n\n\n"):
+            with self.subTest(answers=answers):
+                code, output, errors, installer = self.init_cli(answers)
+                self.assertEqual(code, 0, errors)
+                self.assertIn("Initialization cancelled", output)
+                installer.assert_not_called()
+                self.assertFalse((self.root / "program with spaces" / ".gitsvn").exists())
+                self.assertFalse(self.patches.exists())
+        with patch("builtins.input", side_effect=KeyboardInterrupt):
+            code, _, errors, installer = self.init_cli("")
+        self.assertEqual(code, 130)
+        self.assertIn("Interrupted", errors)
+        installer.assert_not_called()
+        self.assertFalse((self.root / "program with spaces" / ".gitsvn").exists())
+        self.assertFalse(self.patches.exists())
+
+    def test_init_path_registration_failure_retains_saved_configuration(self):
+        code, output, errors, installer = self.init_cli(
+            "\n" * 4, installer_error=GitSvnError("test installer failure"))
+        self.assertEqual(code, 1)
+        config_path = self.root / "program with spaces" / ".gitsvn" / "config.json"
+        self.assertTrue(config_path.is_file())
+        self.assertTrue(self.patches.is_dir())
+        self.assertIn("Saved configuration", output)
+        self.assertIn("Configuration saved, but PATH registration failed", errors)
+        self.assertIn("Retry with: powershell", errors)
+        installer.assert_called_once_with()
+        self.configured_cli(config_path, "status")
+
+    def test_init_failed_config_write_preserves_original_config(self):
+        self.configure(svn_root=str(self.wc), patch_root=str(self.patches), state_dir=".",
+                       autosave=False)
+        config_path = self.state / "config.json"
+        state_before = self.tree_contents(self.state)
+        with patch("main.os.replace", side_effect=OSError("test write failure")):
+            code, _, errors, installer = self.init_cli("\n" * 4, "--config", config_path)
+        self.assertEqual(code, 1)
+        self.assertIn("test write failure", errors)
+        self.assertEqual(self.tree_contents(self.state), state_before)
+        installer.assert_not_called()
+
+    def test_init_cannot_overwrite_branch_state_as_configuration(self):
+        self.new_branch()
+        state_before = self.tree_contents(self.state)
+        patches_before = self.tree_contents(self.patches)
+        code, _, errors, installer = self.init_cli("", "--config", self.state / "state.json")
+        self.assertEqual(code, 1)
+        self.assertIn("reserved for branch state", errors)
+        self.assertEqual(self.tree_contents(self.state), state_before)
+        self.assertEqual(self.tree_contents(self.patches), patches_before)
+        installer.assert_not_called()
+
+    def test_init_installer_uses_bundled_script_and_reports_failure(self):
+        program = self.init_program()
+        output = io.StringIO()
+        with patch("main.__file__", str(program / "main.py")), \
+                patch("main.subprocess.run") as run, patch("main.sys.stdout", output):
+            run.return_value = subprocess.CompletedProcess([], 0, b"registered\n", b"")
+            register_path()
+            self.assertEqual(run.call_args.args[0], [
+                "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+                str(program / "install.ps1"),
+            ])
+            self.assertNotIn("shell", run.call_args.kwargs)
+            self.assertIn("registered", output.getvalue())
+            run.return_value = subprocess.CompletedProcess([], 1, b"", b"test installer error")
+            with self.assertRaisesRegex(GitSvnError, "test installer error"):
+                register_path()
 
     def test_branch_initializes_clean_trunk_without_switching(self):
         self.cli("status")

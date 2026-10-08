@@ -12,6 +12,30 @@ Local commits are snapshots of your uncommitted SVN changes. Publishing changes 
 - `python` and `svn` available on PATH.
 - An existing SVN working copy.
 
+### Guided setup
+
+Keep `main.py`, `gitsvn.cmd`, and `install.ps1` together in the program folder. From that folder, run:
+
+```powershell
+.\gitsvn.cmd init
+```
+
+If `gitsvn` is already on PATH, run `gitsvn init` from any directory. Setup asks for the SVN working-copy root, patch folder, state folder, and autosave setting. **Press Enter to keep each displayed default.** On a first run, it detects the working-copy root from your current checkout when possible; otherwise, enter your checkout's root when prompted. Patch storage defaults to `D:\Patches`, state to `.gitsvn` beside the program, and autosave to `true`.
+
+Setup validates the folders, creates patch and state storage, saves the configuration, and registers the program in your user PATH. **Open a new terminal afterward.** Re-running setup uses your existing settings as defaults, preserving preferences such as `autosave: false`. Relative paths you enter are resolved from the current directory and saved as absolute paths. During the prompts, Ctrl+C cancels without saving settings.
+
+Existing branch state and patches are preserved. When changing the working copy or patch root, choose a separate state folder if the current one belongs to another workspace. Setup creates no commits or initial branch snapshots.
+
+Existing global options also work with `init`, for example:
+
+```powershell
+.\gitsvn.cmd --config C:\Work\another-project.json init
+```
+
+Unlike other commands, `init` can create a missing configuration file selected with `--config`. A nondefault configuration still needs `--config` on subsequent commands; setup prints the invocation. If PATH registration fails after saving, the configuration remains available and the error explains how to retry the installer.
+
+The sections below describe the folder choices and manual setup alternative.
+
 ### Choose the folders
 
 The program can live on any drive, for example `C:\Tools\gitsvn`. Keep `main.py`, `gitsvn.cmd`, and `install.ps1` together. Choose a writable folder, or configure a separate writable state folder.
@@ -83,6 +107,7 @@ Use `gitsvn [options] <command>`:
 
 | Command | What it does |
 | --- | --- |
+| `init` | Configure folders and autosave interactively, then register gitsvn in your user PATH. Enter keeps each default. |
 | `branch` | List local branches; `*` marks the current branch. |
 | `branch NAME` | Create or locate a branch folder and initialize it when needed. |
 | `switch [NAME]` | Restore the branch's saved head, optionally saving outgoing changes according to `autosave`. Omit the name to open the branch picker. |
