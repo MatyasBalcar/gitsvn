@@ -86,7 +86,7 @@ Use `gitsvn [options] <command>`:
 | `branch` | List local branches; `*` marks the current branch. |
 | `branch NAME` | Create or locate a branch folder and initialize it when needed. |
 | `switch [NAME]` | Restore the branch's saved head, optionally saving outgoing changes according to `autosave`. Omit the name to open the branch picker. |
-| `status` | Show the current branch and SVN status. |
+| `status` | Show the current branch's tracked changes; `(*)` after a status letter marks changes missing from its saved head. Added files are green, modified files yellow, and deleted files red. |
 | `add PATH...` | Schedule new files or folders with SVN. Paths are relative to the working-copy root. |
 | `commit -m MESSAGE` | Save a timestamped patch, message, and snapshot metadata in the current branch folder. |
 | `log [BRANCH]` | List saved versions with readable dates, times, messages, and snapshot IDs. Defaults to the current branch. |
@@ -110,6 +110,18 @@ gitsvn pull
 `gitsvn revert` uses the same controls to choose a snapshot from the current branch; `gitsvn revert 12345` chooses from that branch. Each entry shows its date, time, message, and snapshot ID. The branch's **saved head** is marked and selected initially; if none is recorded, the newest snapshot is selected. Cancelling leaves your work and history untouched. After restoring, the selected snapshot becomes the branch's head, even when the recovery autosave has a newer timestamp.
 
 `log` shows local dates and times as `DD.MM.YYYY HH:MM:SS`. The snapshot ID appears in brackets after the message; use that exact ID with `revert`. The branch's saved head is marked **`(current version)`**, even when a newer recovery autosave appears above it. Dates come from generated snapshot names, or the file's last-modified time for older imported patches. Restoring an older version makes it the branch's saved head for future switches.
+
+`status` uses the same change filter as branch snapshots and switching. It includes current tracked edits, including changes made since the last commit, and excludes unversioned files, SVN-ignored files, externals, and `ignore-on-commit` edits. Add new files with `gitsvn add` to include them. Rows use **A** for additions, **M** for text or property modifications, and **D** for deletions; conflicts and missing files remain visible. Colors appear in supported terminals, while redirected output stays plain text.
+
+An **`(*)` after the status letter**, with a space on each side, means that path's current changes differ from the current branch's saved head:
+
+```text
+M  src/Saved.cs
+M (*) src/EditedSinceCommit.cs
+A (*) src/NewFile.cs
+```
+
+When stars appear, status prints `(*) = changes not included in current head`. Committing saves the current changes and clears their stars. Restoring an older snapshot compares against that selected head, even if a newer recovery autosave exists. With no recorded head, every visible change is starred; a missing or invalid recorded head reports a comparison error. Unsupported snapshot changes remain visible and starred. Reverting a path to SVN BASE removes its status row, even if the saved head changed that path. Status only reads the working copy and saved snapshots.
 
 `finalize` normally captures current changes. With `--latest`, it uses the current branch's saved head, or the newest saved patch when no head is recorded. An explicit ticket selects the destination folder and keeps the current branch selected. Finalizing updates the destination's saved head.
 

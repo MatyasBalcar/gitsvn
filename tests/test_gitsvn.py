@@ -152,6 +152,399 @@ class GitSvnIntegrationTests(unittest.TestCase):
         self.assertIn("first change", log)
         self.assertIn("second change", log)
 
+    def test_status_shows_branch_changes_and_excludes_unrelated_files(self):
+        self.write("later.txt", "tracked fixture\n")
+        self.svn("add", "later.txt")
+        self.svn("propset", "svn:ignore", "*.tmp", ".")
+        self.svn("commit", "-m", "status fixture")
+        self.new_branch()
+        self.write("story.txt", "branch edit\n")
+        self.write("newdir/added.txt", "new branch file\n")
+        self.cli("add", "newdir")
+        self.svn("delete", "removed.txt")
+        self.svn("propset", "custom:flag", "branch property", "properties.txt")
+        self.svn("changelist", "ignore-on-commit", "ignored.txt")
+        self.write("ignored.txt", "private edit\n")
+        self.write("scratch.txt", "unversioned file\n")
+        self.write("build.tmp", "SVN-ignored file\n")
+        self.commit("saved branch changes")
+        # New tracked edits belong to the active branch before they are committed.
+        self.write("later.txt", "unsaved tracked edit\n")
+        state_before = self.tree_contents(self.state)
+        patches_before = self.tree_contents(self.patches)
+        status_before = ET.canonicalize(self.svn("status", "--xml", "--no-ignore").stdout)
+        files_before = self.tree_contents(self.wc)
+
+        result = self.cli("status")
+
+        self.assertEqual(result.stdout.splitlines()[0], "On branch 18814")
+        self.assertEqual(set(result.stdout.splitlines()[1:]),
+                         {"A  newdir", "A  newdir/added.txt", "D  removed.txt",
+                          "M  story.txt", "M  properties.txt", "M (*) later.txt",
+                          "(*) = changes not included in current head"})
+        self.assertNotIn("\x1b", result.stdout)
+        output = io.StringIO()
+        with patch("main.ansi_output") as terminal, patch("main.sys.stdout", output):
+            terminal.return_value.__enter__.return_value = True
+            GitSvn(self.wc, self.patches, self.state).status()
+        self.assertIn("\x1b[32mA  newdir/added.txt\x1b[0m", output.getvalue())
+        self.assertIn("\x1b[33mM  story.txt\x1b[0m", output.getvalue())
+        self.assertIn("\x1b[33mM (*) later.txt\x1b[0m", output.getvalue())
+        self.assertIn("\x1b[31mD  removed.txt\x1b[0m", output.getvalue())
+        self.assertNotIn("ignored.txt", output.getvalue())
+        self.assertEqual(self.tree_contents(self.state), state_before)
+        self.assertEqual(self.tree_contents(self.patches), patches_before)
+        self.assertEqual(ET.canonicalize(self.svn("status", "--xml", "--no-ignore").stdout),
+                         status_before)
+        self.assertEqual(self.tree_contents(self.wc), files_before)
+
+    def test_status_follows_current_branch_when_switching(self):
+        self.configure(autosave=False)
+        self.new_branch()
+        self.write("story.txt", "first branch edit\n")
+        self.commit("first branch work")
+        self.svn("changelist", "ignore-on-commit", "ignored.txt")
+        self.write("ignored.txt", "private edit stays across branches\n")
+        self.write("scratch.txt", "unversioned file stays across branches\n")
+        self.new_branch("19999")
+        self.write("properties.txt", "second branch edit\n")
+        self.cli("commit", "-m", "second branch work")
+
+        self.assertEqual(self.cli("status").stdout, "On branch 19999\nM  properties.txt\n")
+        self.cli("switch", "18814")
+        self.assertEqual(self.cli("status").stdout, "On branch 18814\nM  story.txt\n")
+        self.cli("switch", "trunk")
+        self.assertEqual(self.cli("status").stdout,
+                         "On branch trunk\nNo tracked branch changes.\n")
+        self.assertEqual(self.read("ignored.txt"), "private edit stays across branches\n")
+        self.assertEqual(self.read("scratch.txt"), "unversioned file stays across branches\n")
+
+    def test_status_keeps_missing_and_unsupported_snapshot_changes_visible(self):
+        self.new_branch()
+        (self.wc / "removed.txt").unlink()
+        (self.wc / "binary.dat").write_bytes(b"\x00binary data\xff")
+        self.cli("add", "binary.dat")
+        self.svn("copy", "story.txt", "copied.txt")
+        state_before = self.tree_contents(self.state)
+        patches_before = self.tree_contents(self.patches)
+
+        result = self.cli("status")
+
+        self.assertEqual(set(result.stdout.splitlines()[1:]),
+                         {"! (*) removed.txt", "A (*) binary.dat", "A (*) copied.txt",
+                          "(*) = changes not included in current head"})
+        self.assertEqual(self.tree_contents(self.state), state_before)
+        self.assertEqual(self.tree_contents(self.patches), patches_before)
+        output = io.StringIO()
+        with patch("main.ansi_output") as terminal, patch("main.sys.stdout", output):
+            terminal.return_value.__enter__.return_value = True
+            GitSvn(self.wc, self.patches, self.state).status()
+        self.assertIn("\x1b[32mA (*) binary.dat\x1b[0m", output.getvalue())
+        self.assertIn("\x1b[31m! (*) removed.txt\x1b[0m", output.getvalue())
+
+    def test_status_marks_every_visible_change_without_a_recorded_head(self):
+        self.new_branch()
+        self.write("story.txt", "saved work\n")
+        self.commit("existing snapshot")
+        state_path = self.state / "state.json"
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        del state["heads"]["18814"]
+        state_path.write_text(json.dumps(state), encoding="utf-8")
+        self.write("new.txt", "new work\n")
+        self.cli("add", "new.txt")
+        self.svn("delete", "removed.txt")
+        state_before = self.tree_contents(self.state)
+        patches_before = self.tree_contents(self.patches)
+
+        self.assertEqual(self.cli("status").stdout,
+                         "On branch 18814\nA (*) new.txt\nD (*) removed.txt\nM (*) story.txt\n"
+                         "(*) = changes not included in current head\n")
+        self.assertEqual(self.tree_contents(self.state), state_before)
+        self.assertEqual(self.tree_contents(self.patches), patches_before)
+
+    def test_status_marks_further_edits_and_new_changes_until_committed(self):
+        self.new_branch()
+        self.write("story.txt", "saved work\n")
+        self.commit("first work")
+        self.assertEqual(self.cli("status").stdout, "On branch 18814\nM  story.txt\n")
+        self.write("story.txt", "further work\n")
+        self.write("new.txt", "new work\n")
+        self.cli("add", "new.txt")
+
+        self.assertEqual(self.cli("status").stdout,
+                         "On branch 18814\nA (*) new.txt\nM (*) story.txt\n"
+                         "(*) = changes not included in current head\n")
+        self.commit("include further work")
+        self.assertEqual(self.cli("status").stdout,
+                         "On branch 18814\nA  new.txt\nM  story.txt\n")
+        self.svn("revert", "story.txt")
+        self.assertEqual(self.cli("status").stdout, "On branch 18814\nA  new.txt\n")
+        self.svn("revert", "new.txt")
+        self.assertEqual(self.cli("status").stdout,
+                         "On branch 18814\nNo tracked branch changes.\n")
+
+    def test_status_compares_selected_head_despite_newer_recovery_autosave(self):
+        self.new_branch()
+        self.write("story.txt", "first version\n")
+        first = self.commit("first work")
+        self.write("story.txt", "recovery version\n")
+        self.cli("revert", "18814", first)
+        self.assertNotEqual(self.snapshots("18814")[-1].stem, first)
+
+        self.assertEqual(self.cli("status").stdout, "On branch 18814\nM  story.txt\n")
+        self.write("story.txt", "recovery version\n")
+        self.assertEqual(self.cli("status").stdout,
+                         "On branch 18814\nM (*) story.txt\n"
+                         "(*) = changes not included in current head\n")
+
+    def test_status_compares_property_values_and_header_like_payloads(self):
+        self.new_branch()
+        self.write("story.txt", "++ value: original\nIndex: source text\n")
+        self.svn("propset", "custom:note", "++ value: original", "properties.txt")
+        self.svn("propset", "custom:dir", "original directory property", ".")
+        self.commit("text and property values")
+        self.assertEqual(self.cli("status").stdout,
+                         "On branch 18814\nM  .\nM  properties.txt\nM  story.txt\n")
+        self.write("story.txt", "++ value: changed\nIndex: source text\n")
+        self.svn("propset", "custom:note", "++ value: changed", "properties.txt")
+        self.svn("propset", "custom:dir", "changed directory property", ".")
+
+        self.assertEqual(self.cli("status").stdout,
+                         "On branch 18814\nM (*) .\nM (*) properties.txt\nM (*) story.txt\n"
+                         "(*) = changes not included in current head\n")
+
+    def test_status_compares_added_files_directories_and_empty_paths(self):
+        self.new_branch()
+        self.write("newdir/file.txt", "saved file\n")
+        self.write("newdir/empty.txt", "")
+        (self.wc / "newdir/emptydir").mkdir()
+        (self.wc / "newdir/plainempty").mkdir()
+        self.svn("propset", "custom:flag", "saved directory property", "properties.txt")
+        self.cli("add", "newdir")
+        self.svn("propset", "custom:flag", "saved directory property", "newdir/emptydir")
+        self.commit("new paths")
+        self.assertEqual(set(self.cli("status").stdout.splitlines()[1:]),
+                         {"A  newdir", "A  newdir/file.txt", "A  newdir/empty.txt",
+                          "A  newdir/emptydir", "A  newdir/plainempty", "M  properties.txt"})
+        self.write("newdir/empty.txt", "no longer empty\n")
+        self.svn("propset", "custom:flag", "changed directory property", "newdir/emptydir")
+
+        self.assertEqual(set(self.cli("status").stdout.splitlines()[1:]),
+                         {"A (*) newdir", "A  newdir/file.txt", "A (*) newdir/empty.txt",
+                          "A (*) newdir/emptydir", "A  newdir/plainempty", "M  properties.txt",
+                          "(*) = changes not included in current head"})
+        self.commit("updated new paths")
+        self.assertNotIn("*", self.cli("status").stdout)
+
+    def test_status_compares_empty_deletions_and_recursive_directory_deletions(self):
+        self.write("tracked/nested/file.txt", "inside directory\n")
+        self.write("tracked/empty.txt", "")
+        (self.wc / "tracked/emptydir").mkdir()
+        self.write("emptybase.txt", "")
+        (self.wc / "emptybase").mkdir()
+        self.svn("add", "tracked", "emptybase.txt", "emptybase")
+        self.svn("commit", "-m", "deletion fixture")
+        self.new_branch()
+        self.svn("delete", "tracked", "emptybase.txt", "emptybase", "removed.txt")
+        self.commit("deleted paths")
+        result = self.cli("status").stdout
+        self.assertIn("D  tracked\n", result)
+        self.assertIn("D  emptybase\n", result)
+        self.assertIn("D  emptybase.txt\n", result)
+        self.assertIn("D  removed.txt\n", result)
+        self.assertNotIn("*", result)
+
+        self.svn("revert", "--depth", "infinity", "tracked")
+        self.write("tracked/nested/file.txt", "edited instead of deleted\n")
+        self.assertIn("M (*) tracked/nested/file.txt\n", self.cli("status").stdout)
+        self.svn("revert", "tracked/nested/file.txt")
+        self.svn("delete", "tracked/nested/file.txt", "tracked/empty.txt", "tracked/emptydir")
+        self.assertNotIn("*", self.cli("status").stdout)
+
+    def test_status_distinguishes_truncation_and_deletion_with_the_same_text_hunk(self):
+        self.new_branch()
+        self.write("story.txt", "")
+        self.commit("truncate file")
+        self.assertEqual(self.cli("status").stdout, "On branch 18814\nM  story.txt\n")
+        self.svn("delete", "--force", "story.txt")
+        self.assertEqual(self.cli("status").stdout,
+                         "On branch 18814\nD (*) story.txt\n"
+                         "(*) = changes not included in current head\n")
+
+    def test_status_marks_parent_deletion_after_saved_child_deletion(self):
+        self.write("tracked/file.txt", "tracked child\n")
+        self.svn("add", "tracked")
+        self.svn("commit", "-m", "parent deletion fixture")
+        self.new_branch()
+        self.svn("delete", "tracked/file.txt")
+        self.commit("delete only the child")
+        self.assertNotIn("*", self.cli("status").stdout)
+        self.svn("delete", "tracked")
+
+        self.assertIn("D (*) tracked\n", self.cli("status").stdout)
+
+    def test_status_compares_truncated_files_and_embedded_empty_file_properties(self):
+        self.new_branch()
+        self.write("story.txt", "")
+        self.svn("propset", "custom:flag", "saved empty-file property", "story.txt")
+        snapshot = self.commit("empty modified file and property")
+        snapshot_path = self.patches / "18814" / f"{snapshot}.patch"
+        # Older snapshots may carry properties only in the metadata sidecar.
+        patch_bytes = snapshot_path.read_bytes()
+        snapshot_path.write_bytes(patch_bytes.split(b"Property changes on: ", 1)[0])
+        self.assertEqual(self.cli("status").stdout, "On branch 18814\nM  story.txt\n")
+        self.svn("propset", "custom:flag", "changed empty-file property", "story.txt")
+        self.assertEqual(self.cli("status").stdout,
+                         "On branch 18814\nM (*) story.txt\n"
+                         "(*) = changes not included in current head\n")
+
+    def test_status_normalizes_revision_labels_without_ignoring_line_ending_edits(self):
+        self.new_branch()
+        self.write("story.txt", "saved change\n")
+        snapshot = self.commit("saved change")
+        snapshot_path = self.patches / "18814" / f"{snapshot}.patch"
+        snapshot_path.write_bytes(snapshot_path.read_bytes().replace(b"(revision 1)", b"(revision 42)"))
+        self.assertEqual(self.cli("status").stdout, "On branch 18814\nM  story.txt\n")
+        content = (self.wc / "story.txt").read_bytes()
+        (self.wc / "story.txt").write_bytes(content.replace(b"\r\n", b"\n")
+                                           if b"\r\n" in content else content.replace(b"\n", b"\r\n"))
+        self.assertEqual(self.cli("status").stdout,
+                         "On branch 18814\nM (*) story.txt\n"
+                         "(*) = changes not included in current head\n")
+
+    def test_status_compares_legacy_patches_without_metadata(self):
+        self.new_branch()
+        self.write("story.txt", "legacy edit\n")
+        self.write("newdir/new.txt", "legacy addition\n")
+        self.write("empty.txt", "")
+        self.cli("add", "newdir", "empty.txt")
+        self.svn("delete", "removed.txt")
+        self.svn("propset", "custom:flag", "legacy property", "properties.txt")
+        snapshot = self.commit("legacy changes")
+        snapshot_path = self.patches / "18814" / f"{snapshot}.patch"
+        snapshot_path.with_suffix(".json").unlink()
+        snapshot_path.write_bytes(b"\xef\xbb\xbf" + snapshot_path.read_bytes())
+        self.assertNotIn("*", self.cli("status").stdout)
+        self.write("story.txt", "further legacy edit\n")
+        self.svn("propset", "custom:flag", "new property", "properties.txt")
+        result = self.cli("status").stdout
+        self.assertIn("M (*) story.txt\n", result)
+        self.assertIn("M (*) properties.txt\n", result)
+        self.assertIn("A  newdir\n", result)
+        self.assertIn("A  empty.txt\n", result)
+
+    def test_status_compares_recursive_legacy_deletion_without_parent_metadata(self):
+        self.write("tracked/nested/file.txt", "legacy directory\n")
+        self.svn("add", "tracked")
+        self.svn("commit", "-m", "legacy deletion fixture")
+        self.new_branch()
+        self.svn("delete", "tracked")
+        snapshot = self.commit("legacy directory deletion")
+        (self.patches / "18814" / f"{snapshot}.json").unlink()
+        self.assertNotIn("*", self.cli("status").stdout)
+
+    def test_status_reads_head_once_and_does_not_capture_unsupported_changes(self):
+        self.new_branch()
+        self.write("story.txt", "saved work\n")
+        self.commit("saved work")
+        self.svn("copy", "story.txt", "copied.txt")
+        app = GitSvn(self.wc, self.patches, self.state)
+        output = io.StringIO()
+        with patch.object(app, "load_snapshot", wraps=app.load_snapshot) as load, \
+                patch.object(app, "capture", side_effect=AssertionError("status cannot capture")), \
+                patch("main.sys.stdout", output):
+            app.status()
+        load.assert_called_once()
+        self.assertEqual(output.getvalue(),
+                         "On branch 18814\nA (*) copied.txt\nM  story.txt\n"
+                         "(*) = changes not included in current head\n")
+
+    def test_status_marks_binary_edits_and_data_kept_inside_saved_deletions(self):
+        self.new_branch()
+        self.write("story.txt", "saved text\n")
+        self.svn("delete", "removed.txt")
+        self.commit("saved text and deletion")
+        (self.wc / "story.txt").write_bytes(b"\x00binary data\xff")
+        self.write("removed.txt", "local data inside deleted path\n")
+        files_before = self.tree_contents(self.wc)
+        self.assertEqual(self.cli("status").stdout,
+                         "On branch 18814\nD (*) removed.txt\nM (*) story.txt\n"
+                         "(*) = changes not included in current head\n")
+        self.assertEqual(self.tree_contents(self.wc), files_before)
+
+    def test_status_keeps_text_and_property_conflicts_visible_and_starred(self):
+        self.svn("propset", "custom:flag", "base property", "properties.txt")
+        self.svn("commit", "-m", "property fixture")
+        self.new_branch()
+        self.write("story.txt", "local text\n")
+        self.svn("propset", "custom:flag", "local property", "properties.txt")
+        upstream = self.root / "upstream"
+        self.run_process(["svn", "checkout", self.repo_url, str(upstream)])
+        (upstream / "story.txt").write_text("upstream text\n", encoding="utf-8")
+        self.run_process(["svn", "propset", "custom:flag", "upstream property",
+                          "properties.txt"], cwd=upstream)
+        self.run_process(["svn", "commit", "-m", "upstream changes"], cwd=upstream)
+        self.cli("pull", success=False)
+        state_before = self.tree_contents(self.state)
+        patches_before = self.tree_contents(self.patches)
+        status_before = ET.canonicalize(self.svn("status", "--xml").stdout)
+        files_before = self.tree_contents(self.wc)
+
+        self.assertEqual(self.cli("status").stdout,
+                         "On branch 18814\nC (*) properties.txt\nC (*) story.txt\n"
+                         "(*) = changes not included in current head\n")
+        self.assertEqual(self.tree_contents(self.state), state_before)
+        self.assertEqual(self.tree_contents(self.patches), patches_before)
+        self.assertEqual(ET.canonicalize(self.svn("status", "--xml").stdout), status_before)
+        self.assertEqual(self.tree_contents(self.wc), files_before)
+
+    def test_status_excludes_external_working_copy_changes(self):
+        self.write("shared/file.txt", "external fixture\n")
+        self.svn("add", "shared")
+        self.svn("propset", "svn:externals", "^/shared external", ".")
+        self.svn("commit", "-m", "external fixture")
+        self.svn("update")
+        self.new_branch()
+        self.write("story.txt", "saved work\n")
+        self.commit("saved work")
+        self.write("external/file.txt", "external edit\n")
+        files_before = self.tree_contents(self.wc)
+        self.assertEqual(self.cli("status").stdout, "On branch 18814\nM  story.txt\n")
+        self.assertEqual(self.tree_contents(self.wc), files_before)
+
+    def test_status_reports_invalid_recorded_head_without_using_newest_snapshot(self):
+        self.new_branch()
+        self.write("story.txt", "saved work\n")
+        snapshot = self.commit("saved work")
+        state_path = self.state / "state.json"
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        for head in ("missing-head", "../escape", None, 123):
+            with self.subTest(head=head):
+                state["heads"]["18814"] = head
+                state_path.write_text(json.dumps(state), encoding="utf-8")
+                state_before = self.tree_contents(self.state)
+                patches_before = self.tree_contents(self.patches)
+                result = self.cli("status", success=False)
+                self.assertIn("Cannot compare status with current head", result.stderr)
+                self.assertEqual(self.tree_contents(self.state), state_before)
+                self.assertEqual(self.tree_contents(self.patches), patches_before)
+        state["heads"]["18814"] = snapshot
+        state_path.write_text(json.dumps(state), encoding="utf-8")
+        snapshot_path = self.patches / "18814" / f"{snapshot}.patch"
+        for corrupt in ("metadata", "patch", "missing patch"):
+            with self.subTest(corrupt=corrupt):
+                if corrupt == "metadata":
+                    snapshot_path.with_suffix(".json").write_text("{}", encoding="utf-8")
+                elif corrupt == "patch":
+                    snapshot_path.with_suffix(".json").unlink()
+                    snapshot_path.write_bytes(b"not an SVN patch\n")
+                else:
+                    snapshot_path.unlink()
+                result = self.cli("status", success=False)
+                self.assertIn("Cannot compare status with current head", result.stderr)
+        self.svn("revert", "story.txt")
+        self.cli("status", success=False)
+
     def test_switch_autosaves_uncommitted_outgoing_changes(self):
         self.cli("branch", "18814")
         self.write("story.txt", "unsaved trunk work\n")
@@ -1069,6 +1462,7 @@ class GitSvnIntegrationTests(unittest.TestCase):
         self.assertEqual(story.find("wc-status").get("tree-conflicted"), "true")
         patches_before = self.tree_contents(self.patches)
         state_before = self.tree_contents(self.state)
+        self.assertIn("C (*) story.txt\n", self.cli("status").stdout)
         self.cli("switch", "18814", success=False)
         self.assertEqual(self.read("story.txt"), "local edit before upstream deletion\n")
         self.assertEqual(self.tree_contents(self.patches), patches_before)
