@@ -2,7 +2,21 @@ $ErrorActionPreference = 'Stop'
 
 $gitsvnDirectory = [System.IO.Path]::GetFullPath($PSScriptRoot).TrimEnd('\')
 
-foreach ($gitsvnFile in @('main.py', 'gitsvn.cmd')) {
+foreach ($gitsvnFile in @(
+    'main.py',
+    'gitsvn.cmd',
+    'gitsvn\__init__.py',
+    'gitsvn\models.py',
+    'gitsvn\config.py',
+    'gitsvn\terminal.py',
+    'gitsvn\working_copy.py',
+    'gitsvn\snapshots.py',
+    'gitsvn\inspection.py',
+    'gitsvn\branches.py',
+    'gitsvn\app.py',
+    'gitsvn\setup.py',
+    'gitsvn\cli.py'
+)) {
     if (-not (Test-Path -LiteralPath (Join-Path $gitsvnDirectory $gitsvnFile) -PathType Leaf)) {
         throw "Missing gitsvn file: $gitsvnFile"
     }

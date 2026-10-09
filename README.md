@@ -14,7 +14,7 @@ Local commits are snapshots of your uncommitted SVN changes. Publishing changes 
 
 ### Guided setup
 
-Keep `main.py`, `gitsvn.cmd`, and `install.ps1` together in the program folder. From that folder, run:
+Keep `main.py`, `gitsvn.cmd`, `install.ps1`, and the entire `gitsvn` folder together in the program folder. From that folder, run:
 
 ```powershell
 .\gitsvn.cmd init
@@ -38,7 +38,7 @@ The sections below describe the folder choices and manual setup alternative.
 
 ### Choose the folders
 
-The program can live on any drive, for example `C:\Tools\gitsvn`. Keep `main.py`, `gitsvn.cmd`, and `install.ps1` together. Choose a writable folder, or configure a separate writable state folder.
+The program can live on any drive, for example `C:\Tools\gitsvn`. Keep `main.py`, `gitsvn.cmd`, `install.ps1`, and the entire `gitsvn` folder together. Choose a writable folder, or configure a separate writable state folder.
 
 Patch storage defaults to **`D:\Patches`**. Your PC needs a `D:` drive to use that default. The first save creates the folder and its branch subfolders automatically; you can also create it yourself:
 
@@ -202,6 +202,8 @@ The snapshot workflow supports text changes, SVN properties, additions, deletion
 Binary changes, SVN copies or moves, replacements, missing files, and unresolved conflicts stop snapshot creation before changes are reverted. A scheduled deletion that still exists on disk needs its local data moved aside first. Resolve SVN update conflicts with your usual SVN tools before switching branches.
 
 ## Help and checks
+
+`main.py` is the launcher; the implementation lives in the `gitsvn` package. Configuration and guided setup are in `config.py` and `setup.py`, terminal menus and the diff viewer in `terminal.py`, and command parsing in `cli.py`. Working-copy operations, snapshots, branches, and inspection have their own modules; `app.py` combines them into the application. Configuration and state still default to `.gitsvn` beside `main.py`.
 
 ```powershell
 gitsvn --help

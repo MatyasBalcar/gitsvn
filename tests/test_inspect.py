@@ -8,7 +8,8 @@ import shutil
 import unittest
 from unittest.mock import patch
 
-import main as application
+from gitsvn.app import GitSvn
+from gitsvn.cli import main
 import test_gitsvn as fixtures
 
 
@@ -179,14 +180,14 @@ class InspectIntegrationTests(unittest.TestCase):
         )}
         output = io.StringIO()
         keys = iter(["\r", "q", "\x1b"])
-        with patch("main.picker_input") as console, \
-                patch("main.sys.stdout", output), \
-                patch("main.shutil.get_terminal_size", return_value=os.terminal_size((160, 24))), \
-                patch.object(application.GitSvn, "svn", side_effect=AssertionError("SVN query")), \
-                patch.object(application.GitSvn, "verify_working_copy",
+        with patch("gitsvn.terminal.picker_input") as console, \
+                patch("gitsvn.cli.sys.stdout", output), \
+                patch("gitsvn.terminal.shutil.get_terminal_size", return_value=os.terminal_size((160, 24))), \
+                patch.object(GitSvn, "svn", side_effect=AssertionError("SVN query")), \
+                patch.object(GitSvn, "verify_working_copy",
                              side_effect=AssertionError("SVN verification")):
             console.return_value.__enter__.return_value = keys.__next__
-            code = application.main([
+            code = main([
                 "--svn-root", str(self.wc), "--patch-root", str(self.patches),
                 "--state-dir", str(self.state), "inspect",
             ])

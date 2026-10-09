@@ -6,15 +6,15 @@ import re
 import unittest
 from unittest.mock import Mock, patch
 
-from main import terminal_slice, terminal_text, terminal_width, view_diff
+from gitsvn.terminal import terminal_slice, terminal_text, terminal_width, view_diff
 
 
 class DiffViewerTests(unittest.TestCase):
     def run_viewer(self, keys, lines, *, title="Saved diff", size=(80, 7), output=None):
         output = output if output is not None else io.StringIO()
-        with patch("main.picker_input") as input_mode, \
-                patch("main.shutil.get_terminal_size", return_value=os.terminal_size(size)), \
-                patch("main.sys.stdout", output):
+        with patch("gitsvn.terminal.picker_input") as input_mode, \
+                patch("gitsvn.terminal.shutil.get_terminal_size", return_value=os.terminal_size(size)), \
+                patch("gitsvn.cli.sys.stdout", output):
             input_mode.return_value.__enter__.return_value = Mock(side_effect=keys)
             view_diff(title, lines)
         return output.getvalue()
@@ -67,7 +67,7 @@ class DiffViewerTests(unittest.TestCase):
 
     def test_plain_output_keeps_all_lines_and_sanitizes_terminal_controls(self):
         output = io.StringIO()
-        with patch("main.picker_input") as input_mode, patch("main.sys.stdout", output):
+        with patch("gitsvn.terminal.picker_input") as input_mode, patch("gitsvn.cli.sys.stdout", output):
             input_mode.return_value.__enter__.return_value = None
             view_diff("Title\x1b]8;;url\x07", ["+added\ttext", "-removed\x1b[2J", " context"])
         self.assertEqual(output.getvalue(),

@@ -14,7 +14,11 @@ from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
-from main import GitSvn, GitSvnError, main, pick_branch, register_path
+from gitsvn.app import GitSvn
+from gitsvn.cli import main
+from gitsvn.models import GitSvnError
+from gitsvn.setup import register_path
+from gitsvn.terminal import pick_branch
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -121,6 +125,8 @@ class GitSvnIntegrationTests(unittest.TestCase):
         program.mkdir(exist_ok=True)
         for name in ("main.py", "gitsvn.cmd", "install.ps1"):
             shutil.copy2(PROJECT_ROOT / name, program / name)
+        shutil.copytree(PROJECT_ROOT / "gitsvn", program / "gitsvn", dirs_exist_ok=True,
+                        ignore=shutil.ignore_patterns("__pycache__"))
         return program
 
     def init_cli(self, answers, *args, cwd=None, default_root=None, installer_error=None):
@@ -129,12 +135,13 @@ class GitSvnIntegrationTests(unittest.TestCase):
         previous_dir = Path.cwd()
         try:
             os.chdir(cwd or self.root)
-            with patch("main.__file__", str(program / "main.py")), \
-                    patch("main.DEFAULT_SVN_ROOT", default_root or self.wc), \
-                    patch("main.DEFAULT_PATCH_ROOT", self.patches), \
-                    patch("main.sys.stdin", io.StringIO(answers)), \
-                    patch("main.sys.stdout", output), patch("main.sys.stderr", errors), \
-                    patch("main.register_path") as installer:
+            with patch("gitsvn.config.program_directory", return_value=program), \
+                    patch("gitsvn.config.DEFAULT_SVN_ROOT", default_root or self.wc), \
+                    patch("gitsvn.config.DEFAULT_PATCH_ROOT", self.patches), \
+                    patch("gitsvn.cli.sys.stdin", io.StringIO(answers)), \
+                    patch("gitsvn.cli.sys.stdout", output), \
+                    patch("gitsvn.cli.sys.stderr", errors), \
+                    patch("gitsvn.setup.register_path") as installer:
                 installer.side_effect = installer_error
                 code = main([*map(str, args), "init"])
         finally:
@@ -319,7 +326,7 @@ class GitSvnIntegrationTests(unittest.TestCase):
                        autosave=False)
         config_path = self.state / "config.json"
         state_before = self.tree_contents(self.state)
-        with patch("main.os.replace", side_effect=OSError("test write failure")):
+        with patch("gitsvn.config.os.replace", side_effect=OSError("test write failure")):
             code, _, errors, installer = self.init_cli("\n" * 4, "--config", config_path)
         self.assertEqual(code, 1)
         self.assertIn("test write failure", errors)
@@ -340,8 +347,9 @@ class GitSvnIntegrationTests(unittest.TestCase):
     def test_init_installer_uses_bundled_script_and_reports_failure(self):
         program = self.init_program()
         output = io.StringIO()
-        with patch("main.__file__", str(program / "main.py")), \
-                patch("main.subprocess.run") as run, patch("main.sys.stdout", output):
+        with patch("gitsvn.config.program_directory", return_value=program), \
+                patch("gitsvn.setup.subprocess.run") as run, \
+                patch("gitsvn.cli.sys.stdout", output):
             run.return_value = subprocess.CompletedProcess([], 0, b"registered\n", b"")
             register_path()
             self.assertEqual(run.call_args.args[0], [
@@ -371,6 +379,24 @@ class GitSvnIntegrationTests(unittest.TestCase):
         self.assertEqual(self.read("story.txt"), "original\n")
         self.cli("switch", "trunk")
         self.assertEqual(self.read("story.txt"), "dirty trunk\n")
+
+    def test_branch_cannot_use_installed_package_folder_as_snapshot_storage(self):
+        program = self.init_program()
+        program_before = self.tree_contents(program)
+        self.write("story.txt", "pending work must survive reserved branch\n")
+
+        result = self.run_process([
+            sys.executable, str(program / "main.py"), "--svn-root", str(self.wc),
+            "--patch-root", str(program), "--state-dir", str(self.state),
+            "branch", "gitsvn",
+        ], success=False)
+
+        self.assertIn("reserved for gitsvn itself", result.stderr)
+        # Python may cache its imports, but source and configuration stay untouched.
+        self.assertEqual({path: content for path, content in self.tree_contents(program).items()
+                          if "__pycache__" not in Path(path).parts}, program_before)
+        self.assertFalse(self.state.exists())
+        self.assertEqual(self.read("story.txt"), "pending work must survive reserved branch\n")
 
     def test_branch_roundtrip_and_historical_revert_preserve_selected_head(self):
         self.new_branch()
@@ -425,7 +451,7 @@ class GitSvnIntegrationTests(unittest.TestCase):
                           "M  story.txt", "M  properties.txt", "M  later.txt"})
         self.assertNotIn("\x1b", result.stdout)
         output = io.StringIO()
-        with patch("main.ansi_output") as terminal, patch("main.sys.stdout", output):
+        with patch("gitsvn.inspection.ansi_output") as terminal, patch("gitsvn.cli.sys.stdout", output):
             terminal.return_value.__enter__.return_value = True
             GitSvn(self.wc, self.patches, self.state).status()
         self.assertIn("\x1b[32mA\x1b[0m  \x1b[37mnewdir/added.txt\x1b[0m", output.getvalue())
@@ -478,7 +504,7 @@ class GitSvnIntegrationTests(unittest.TestCase):
         self.assertEqual(self.tree_contents(self.state), state_before)
         self.assertEqual(self.tree_contents(self.patches), patches_before)
         output = io.StringIO()
-        with patch("main.ansi_output") as terminal, patch("main.sys.stdout", output):
+        with patch("gitsvn.inspection.ansi_output") as terminal, patch("gitsvn.cli.sys.stdout", output):
             terminal.return_value.__enter__.return_value = True
             GitSvn(self.wc, self.patches, self.state).status()
         self.assertIn("\x1b[32mA\x1b[0m  \x1b[31mbinary.dat\x1b[0m", output.getvalue())
@@ -705,7 +731,7 @@ class GitSvnIntegrationTests(unittest.TestCase):
         output = io.StringIO()
         with patch.object(app, "load_snapshot", wraps=app.load_snapshot) as load, \
                 patch.object(app, "capture", side_effect=AssertionError("status cannot capture")), \
-                patch("main.sys.stdout", output):
+                patch("gitsvn.cli.sys.stdout", output):
             app.status()
         load.assert_called_once()
         self.assertEqual(output.getvalue(),
@@ -988,7 +1014,7 @@ class GitSvnIntegrationTests(unittest.TestCase):
             "state_dir": ".", "autosave": False,
         }), encoding="utf-8")
 
-        with patch("main.__file__", str(program_dir / "main.py")):
+        with patch("gitsvn.config.program_directory", return_value=program_dir):
             app = GitSvn()
             app.verify_working_copy()
             app.create_branch("18814")
@@ -1412,7 +1438,7 @@ class GitSvnIntegrationTests(unittest.TestCase):
         self.commit("second version")
         app = GitSvn(self.wc, self.patches, self.state)
         output = io.StringIO()
-        with patch("main.picker_input") as console, patch("main.sys.stdout", output):
+        with patch("gitsvn.terminal.picker_input") as console, patch("gitsvn.cli.sys.stdout", output):
             console.return_value.__enter__.return_value = iter(["\xe0", "P", "\r"]).__next__
             app.select_restore("18814", None)
         self.assertEqual(self.read("story.txt"), "first saved version\n")
@@ -1424,7 +1450,7 @@ class GitSvnIntegrationTests(unittest.TestCase):
         patches_before = self.tree_contents(self.patches)
         state_before = self.tree_contents(self.state)
         output = io.StringIO()
-        with patch("main.picker_input") as console, patch("main.sys.stdout", output):
+        with patch("gitsvn.terminal.picker_input") as console, patch("gitsvn.cli.sys.stdout", output):
             console.return_value.__enter__.return_value = iter(["\x1b"]).__next__
             app.select_restore("18814", None)
         saved_at = datetime.strptime(first, "%Y%m%d_%H%M%S_%f")
@@ -2007,8 +2033,8 @@ class GitSvnIntegrationTests(unittest.TestCase):
 class BranchPickerTests(unittest.TestCase):
     def choose(self, keys, names=None, current="trunk", lines=24):
         output = io.StringIO()
-        with patch("main.picker_input") as console, patch("main.sys.stdout", output), \
-                patch("main.shutil.get_terminal_size", return_value=os.terminal_size((80, lines))):
+        with patch("gitsvn.terminal.picker_input") as console, patch("gitsvn.cli.sys.stdout", output), \
+                patch("gitsvn.terminal.shutil.get_terminal_size", return_value=os.terminal_size((80, lines))):
             console.return_value.__enter__.return_value = iter(keys).__next__
             selected = pick_branch(names or ["18814", "19999", "trunk"], current)
         return selected, output.getvalue()
@@ -2047,7 +2073,7 @@ class BranchPickerTests(unittest.TestCase):
 
     def test_keyboard_interrupt_restores_cursor(self):
         output = io.StringIO()
-        with patch("main.picker_input") as console, patch("main.sys.stdout", output):
+        with patch("gitsvn.terminal.picker_input") as console, patch("gitsvn.cli.sys.stdout", output):
             console.return_value.__enter__.return_value = iter(["\x03"]).__next__
             with self.assertRaises(KeyboardInterrupt):
                 pick_branch(["18814", "trunk"], "trunk")
