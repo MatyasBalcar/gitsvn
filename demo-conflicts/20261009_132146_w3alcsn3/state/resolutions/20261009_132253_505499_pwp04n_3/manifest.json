@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "path": "sql/141_demo.sql",
+  "method": "mine-first",
+  "files": {
+    "sql/141_demo.sql": "working-file",
+    "sql/141_demo.sql.r1": "artifact-1",
+    "sql/141_demo.sql.mine": "artifact-2",
+    "sql/141_demo.sql.r2": "artifact-3"
+  }
+}

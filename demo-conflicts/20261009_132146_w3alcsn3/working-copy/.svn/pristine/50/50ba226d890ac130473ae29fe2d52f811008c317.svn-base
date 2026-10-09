@@ -1,0 +1,35 @@
+-- Demo context line 01
+-- Developer comment: original
+-- Demo context line 03
+-- Demo context line 04
+-- Demo context line 05
+-- Demo context line 06
+-- Demo context line 07
+-- Demo context line 08
+-- Demo context line 09
+-- Demo context line 10
+-- Demo context line 11
+-- Demo context line 12
+-- Demo context line 13
+-- Demo context line 14
+-- Demo context line 15
+-- Demo context line 16
+-- Demo context line 17
+UPDATE DemoSettings SET UpgradeMode = 'incoming-deployed-version';
+-- Demo context line 19
+-- Demo context line 20
+-- Demo context line 21
+-- Demo context line 22
+-- Demo context line 23
+-- Demo context line 24
+-- Demo context line 25
+-- Demo context line 26
+-- Demo context line 27
+-- Demo context line 28
+-- Demo context line 29
+-- Demo context line 30
+-- Demo context line 31
+-- Demo context line 32
+-- Deployment comment: keep the incoming deployment change
+-- Demo context line 34
+-- Demo context line 35

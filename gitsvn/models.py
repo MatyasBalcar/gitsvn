@@ -24,3 +24,22 @@ class Snapshot:
     patch: bytes
     entries: list
     empty_properties: dict
+
+
+@dataclass
+class Conflict:
+    entry: Entry
+    info: bytes
+    contents: bytes | None
+    artifacts: dict
+    versions: dict
+    properties: dict
+    incoming_properties: dict
+    property_names: list
+
+
+@dataclass
+class Resolution:
+    method: str
+    contents: bytes | None
+    properties: dict

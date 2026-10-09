@@ -1,0 +1,20 @@
+Index: sql/141_demo.sql
+===================================================================
+--- sql/141_demo.sql	(revision 1)
++++ sql/141_demo.sql	(working copy)
+@@ -1,5 +1,5 @@
+ -- Demo context line 01
+--- Developer comment: original
++-- Developer comment: keep my local work
+ -- Demo context line 03
+ -- Demo context line 04
+ -- Demo context line 05
+@@ -15,7 +15,7 @@
+ -- Demo context line 15
+ -- Demo context line 16
+ -- Demo context line 17
+-UPDATE DemoSettings SET UpgradeMode = 'original';
++UPDATE DemoSettings SET UpgradeMode = 'my-development-version';
+ -- Demo context line 19
+ -- Demo context line 20
+ -- Demo context line 21

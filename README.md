@@ -119,7 +119,8 @@ Use `gitsvn [options] <command>`:
 | `inspect` | Choose a changed path from the current saved version and view its patch in a read-only terminal viewer. |
 | `revert [BRANCH] [SNAPSHOT]` | Restore a saved version and select its branch. Omit the snapshot ID to open the snapshot picker; the branch defaults to the current branch. |
 | `finalize DESCRIPTION [TICKET]` | Save a normal commit in the ticket folder and export a named patch directly into the patch root. The ticket defaults to the current branch. |
-| `pull` | Save pending changes for recovery, then run SVN update at the working-copy root, excluding externals. |
+| `pull` | Save pending changes for recovery, then run SVN update at the working-copy root, excluding externals and postponing conflict resolution. |
+| `resolve [PATH] [--accept METHOD]` | Review an SVN conflict, preview a proposed result, and confirm before applying the resolution. Omit the path to choose a conflicted file. |
 
 Examples:
 
@@ -130,6 +131,8 @@ gitsvn revert 12345 20261002_143000_123456
 gitsvn finalize "Fix input validation" 12345
 gitsvn finalize SavedVersion 12345 --latest
 gitsvn pull
+gitsvn resolve
+gitsvn resolve sql\Upgrade.sql --accept mine-conflict
 ```
 
 `gitsvn switch` opens a terminal menu of local branches, including `trunk`, with the current branch highlighted. Use **Up/Down** to choose and **Enter** to switch; **Esc** or **q** cancels. Long lists scroll as you move. When the terminal cannot display the menu or input/output is redirected, it shows a numbered list instead. Selecting the current branch or cancelling leaves your work and history untouched.
@@ -148,6 +151,28 @@ Committing saves the current changes and turns their filenames white. Restoring 
 
 Descriptions must start with a letter or number and use letters, numbers, spaces, dots, underscores, or hyphens. Spaces become underscores in the export filename. Existing finalized patches are never overwritten; choose another description for another export on the same day.
 
+### Resolve update conflicts
+
+`gitsvn pull` postpones conflicts so you can review them afterward with `gitsvn resolve`. Run `resolve` without a path to choose a conflicted file using the same arrow-key menu as `switch`, or pass a path relative to the working-copy root. It shows the conflict details and lets you choose a proposed result:
+
+| Method | Result |
+| --- | --- |
+| `mine-conflict` | Keep your side of each conflicting block, preserving the other merged changes and edits made after the update. |
+| `theirs-conflict` | Keep the incoming side of each conflicting block, preserving the other merged changes and later edits. |
+| `mine-first` | Keep both sides of each conflicting text block, with your lines first. |
+| `theirs-first` | Keep both sides of each conflicting text block, with the incoming lines first. |
+| `mine-full` | Use your entire file from before the update. |
+| `theirs-full` | Use the entire incoming file. |
+| `working` | Keep your manually edited working file after you have removed the conflict markers. |
+
+**Every choice opens a diff preview before changing the working copy.** After reviewing it, select **Apply resolution** to write the result and mark the conflict resolved, or **Back** to choose again. **Esc**, **q**, or end of input cancels without changing files or creating recovery copies. The diff viewer has the same scrolling controls as `inspect`. In a numbered terminal fallback, choose `2` at the confirmation menu to apply.
+
+`--accept METHOD` selects a method when you also provide a path; it still requires the preview and confirmation. To resolve a file manually, edit it with your usual editor and then choose `working`. Ordered combinations (`mine-first` and `theirs-first`) apply to text conflicts. Property conflicts can be reviewed and resolved too; incoming choices change only conflicted properties. When an incoming property cannot be identified automatically, edit the property yourself and choose `working`. Tree conflicts require you to fix the working-copy structure manually and review it with `working`.
+
+Text block choices require complete SVN conflict markers. If a delimiter is attached to a line without a final newline, or the markers are malformed, choose a whole-file version or prepare a manually edited result instead.
+
+Before an approved resolution is applied, gitsvn saves the current file, available SVN conflict files, properties, and conflict details under `state_dir\resolutions\TIMESTAMP`. These recovery files can be used to recover contents manually; they do not recreate SVN conflict metadata automatically. Resolving creates no normal commit and does not change the current branch or its saved head.
+
 ## Configuration
 
 The default configuration is `.gitsvn\config.json` beside `main.py`. All settings are optional:
@@ -156,7 +181,7 @@ The default configuration is `.gitsvn\config.json` beside `main.py`. All setting
 | --- | --- |
 | `svn_root` | SVN working-copy root. Configure this for your checkout. |
 | `patch_root` | Folder for branch snapshots and finalized patches; defaults to `D:\Patches`. |
-| `state_dir` | Folder for local branch state; defaults to the configuration file's directory. |
+| `state_dir` | Folder for local branch state and conflict recovery copies; defaults to the configuration file's directory. |
 | `autosave` | Save outgoing changes when switching branches; defaults to `true`. |
 
 Setting `state_dir` changes where state is stored; the configuration continues to load from the same file. Relative paths in the configuration are resolved from that file's directory. Relative command-line paths are resolved from your current directory.
@@ -199,15 +224,16 @@ Patch headers are always relative to the selected SVN working-copy root, regardl
 
 The snapshot workflow supports text changes, SVN properties, additions, deletions, and empty files or directories. Files in the `ignore-on-commit` changelist are excluded and preserved. Unversioned and SVN-ignored files stay untouched; schedule new files with `add` before committing them.
 
-Binary changes, SVN copies or moves, replacements, missing files, and unresolved conflicts stop snapshot creation before changes are reverted. A scheduled deletion that still exists on disk needs its local data moved aside first. Resolve SVN update conflicts with your usual SVN tools before switching branches.
+Binary changes, SVN copies or moves, replacements, missing files, and unresolved conflicts stop snapshot creation before changes are reverted. A scheduled deletion that still exists on disk needs its local data moved aside first. Resolve SVN update conflicts with `gitsvn resolve` or your usual SVN tools before switching branches.
 
 ## Help and checks
 
-`main.py` is the launcher; the implementation lives in the `gitsvn` package. Configuration and guided setup are in `config.py` and `setup.py`, terminal menus and the diff viewer in `terminal.py`, and command parsing in `cli.py`. Working-copy operations, snapshots, branches, and inspection have their own modules; `app.py` combines them into the application. Configuration and state still default to `.gitsvn` beside `main.py`.
+`main.py` is the launcher; the implementation lives in the `gitsvn` package. Configuration and guided setup are in `config.py` and `setup.py`, terminal menus and the diff viewer in `terminal.py`, and command parsing in `cli.py`. Working-copy operations, snapshots, branches, and inspection have their own modules; conflict handling is in `conflicts.py`, `conflict_ui.py`, and `merge.py`. `app.py` combines them into the application. Configuration and state still default to `.gitsvn` beside `main.py`.
 
 ```powershell
 gitsvn --help
 gitsvn finalize --help
+gitsvn resolve --help
 ```
 
 To run the integration checks from the program folder, also make `svnadmin` available on PATH:
@@ -217,3 +243,11 @@ python -m unittest discover -s tests -v
 ```
 
 The checks use temporary local SVN repositories and separate state and patch folders.
+
+To try the conflict resolver yourself, create a separate demo checkout:
+
+```powershell
+python scripts/create_conflict_demo.py --resolve
+```
+
+The script manufactures a real SVN update conflict in a sample upgrade file and opens the resolver in your terminal. You review the choices and apply a resolution yourself. Omit `--resolve` to leave the conflict waiting and open the printed `resolve.cmd` launcher later. The demo uses its own configuration, patches, and state. Its `demo.cmd` launcher also supports commands such as `status` and `inspect`. Run the setup script again to create a fresh conflict for another test; each run creates a new folder under `demo-conflicts`.

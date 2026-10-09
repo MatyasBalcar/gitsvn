@@ -191,8 +191,8 @@ class BranchMixin:
         snapshot = self.capture(entries)
         if snapshot.entries:
             self.save_snapshot(self.branch, snapshot, "Autosave before svn update")
-        output = self.svn("update", "--ignore-externals", ".")
+        output = self.svn("update", "--accept", "postpone", "--ignore-externals", ".")
         print(output.decode("utf-8", errors="replace").rstrip())
         if any(entry.item == "conflicted" or entry.props == "conflicted" or entry.tree_conflicted
                for entry in self.entries()):
-            raise GitSvnError("SVN update produced conflicts. Resolve them before switching branches.")
+            raise GitSvnError("SVN update produced conflicts. Run gitsvn resolve before switching branches.")

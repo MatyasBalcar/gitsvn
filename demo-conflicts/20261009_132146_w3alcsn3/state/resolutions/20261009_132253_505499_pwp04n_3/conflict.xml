@@ -1,0 +1,27 @@
+<info>
+<entry kind="file" path="sql\141_demo.sql" revision="2">
+<url>file:///D:/Patches/GitSVN/demo-conflicts/20261009_132146_w3alcsn3/repository/sql/141_demo.sql</url>
+<relative-url>^/sql/141_demo.sql</relative-url>
+<repository>
+<root>file:///D:/Patches/GitSVN/demo-conflicts/20261009_132146_w3alcsn3/repository</root>
+<uuid>ac746b55-a3a1-df40-b386-e3c44eb798a9</uuid>
+</repository>
+<wc-info>
+<wcroot-abspath>D:/Patches/GitSVN/demo-conflicts/20261009_132146_w3alcsn3/working-copy</wcroot-abspath>
+<schedule>normal</schedule>
+<depth>infinity</depth>
+<checksum>50ba226d890ac130473ae29fe2d52f811008c317</checksum>
+</wc-info>
+<commit revision="2">
+<author>balcarm</author>
+<date>2026-10-09T11:21:47.693380Z</date>
+</commit>
+<conflict operation="update" type="text">
+<version kind="file" path-in-repos="sql/141_demo.sql" repos-url="file:///D:/Patches/GitSVN/demo-conflicts/20261009_132146_w3alcsn3/repository" revision="1" side="source-left"></version>
+<version kind="file" path-in-repos="sql/141_demo.sql" repos-url="file:///D:/Patches/GitSVN/demo-conflicts/20261009_132146_w3alcsn3/repository" revision="2" side="source-right"></version>
+<prev-base-file>D:/Patches/GitSVN/demo-conflicts/20261009_132146_w3alcsn3/working-copy/sql/141_demo.sql.r1</prev-base-file>
+<prev-wc-file>D:/Patches/GitSVN/demo-conflicts/20261009_132146_w3alcsn3/working-copy/sql/141_demo.sql.mine</prev-wc-file>
+<cur-base-file>D:/Patches/GitSVN/demo-conflicts/20261009_132146_w3alcsn3/working-copy/sql/141_demo.sql.r2</cur-base-file>
+</conflict>
+</entry>
+</info>

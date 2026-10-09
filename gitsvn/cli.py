@@ -6,6 +6,7 @@ import sys
 import xml.etree.ElementTree as ET
 
 from .app import GitSvn
+from .conflicts import ACCEPT_METHODS
 from .models import GitSvnError
 from .setup import initialize
 
@@ -35,6 +36,10 @@ def parser():
     revert.add_argument("branch", nargs="?")
     revert.add_argument("snapshot", nargs="?", help="Snapshot ID; omit to open the snapshot picker")
     commands.add_parser("pull", help="Autosave changes and run svn update")
+    resolve = commands.add_parser("resolve", help="Review and resolve SVN conflicts")
+    resolve.add_argument("path", nargs="?", help="Working-copy path; omit to pick a conflict")
+    resolve.add_argument("--accept", choices=ACCEPT_METHODS,
+                         help="Resolution to preview; requires a path and confirmation")
     commands.add_parser("status", help="Show the current branch's tracked changes")
     add = commands.add_parser("add", help="Schedule working-copy paths with svn add")
     add.add_argument("paths", nargs="+")
@@ -47,7 +52,7 @@ def main(argv=None):
         if arguments.command == "init":
             return initialize(arguments)
         app = GitSvn(arguments.svn_root, arguments.patch_root, arguments.state_dir, arguments.config)
-        if (arguments.command in ("switch", "commit", "revert", "pull", "status", "add") or
+        if (arguments.command in ("switch", "commit", "revert", "pull", "status", "add", "resolve") or
                 (arguments.command == "finalize" and not arguments.latest)):
             app.verify_working_copy()
         if arguments.command == "branch":
@@ -66,6 +71,8 @@ def main(argv=None):
             app.select_restore(arguments.branch or app.branch, arguments.snapshot)
         elif arguments.command == "pull":
             app.pull()
+        elif arguments.command == "resolve":
+            app.resolve(arguments.path, arguments.accept)
         elif arguments.command == "status":
             app.status()
         elif arguments.command == "add":

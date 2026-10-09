@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "svn_root": "D:\\Patches\\GitSVN\\demo-conflicts\\20261009_132146_w3alcsn3\\working-copy",
+  "patch_root": "D:\\Patches\\GitSVN\\demo-conflicts\\20261009_132146_w3alcsn3\\patches",
+  "branch": "demo141",
+  "heads": {
+    "demo141": "20261009_132147_898020"
+  }
+}

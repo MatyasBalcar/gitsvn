@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "entries": [
+    {
+      "path": "sql/141_demo.sql",
+      "item": "modified",
+      "kind": "file",
+      "empty": false
+    }
+  ],
+  "empty_properties": {}
+}
