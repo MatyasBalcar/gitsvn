@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import re
 import tempfile
+from urllib.parse import quote
 import xml.etree.ElementTree as ET
 
 from .merge import CONFLICT_MARKERS, merge_text
@@ -99,6 +100,23 @@ class ConflictMixin:
         return Conflict(entry, info, path.read_bytes() if path.is_file() else None,
                         artifacts, versions, properties, incoming, names)
 
+    def incoming_conflict_properties(self, conflict):
+        nodes = ET.fromstring(conflict.info).findall(".//conflict[@type='property']")
+        if all(node.get("operation") in ("update", "switch") for node in nodes):
+            return conflict.incoming_properties
+        sources = {(version.get("repos-url"), version.get("path-in-repos"),
+                    version.get("revision")) for node in nodes
+                   for version in node.findall("version[@side='source-right']")}
+        if len(sources) != 1 or any(not node.findall("version[@side='source-right']")
+                                    for node in nodes):
+            raise GitSvnError("Cannot identify incoming properties; edit them and choose working.")
+        repository, path, revision = sources.pop()
+        if not repository or path is None or not revision or not revision.isdigit():
+            raise GitSvnError("Cannot identify incoming properties; edit them and choose working.")
+        url = repository.rstrip("/") + "/" + quote(path.lstrip("/"), safe="/")
+        return property_values(self.svn("proplist", "--xml", "--verbose", "--depth", "empty",
+                                        "-r", revision, "--", url + "@" + revision))
+
     def propose_resolution(self, conflict, method):
         if method not in ACCEPT_METHODS:
             raise GitSvnError(f"Unknown resolution method: {method}")
@@ -127,9 +145,10 @@ class ConflictMixin:
         if entry.props == "conflicted" and method in ("theirs-conflict", "theirs-full"):
             if not conflict.property_names:
                 raise GitSvnError("Cannot identify conflicted properties; edit them and choose working.")
+            incoming = self.incoming_conflict_properties(conflict)
             for name in conflict.property_names:
-                if name in conflict.incoming_properties:
-                    properties[name] = conflict.incoming_properties[name]
+                if name in incoming:
+                    properties[name] = incoming[name]
                 else:
                     properties.pop(name, None)
         return Resolution(method, contents, properties)

@@ -1,0 +1,22 @@
+Index: moraviacans/tools/CustUpgrade_Local_Production.bat
+===================================================================
+--- moraviacans/tools/CustUpgrade_Local_Production.bat	(revision 99549)
++++ moraviacans/tools/CustUpgrade_Local_Production.bat	(working copy)
+@@ -2,7 +2,7 @@
+ 
+ @call ..\..\tools\SetELektLabsEnvVariables.bat
+ 
+-SET DATABASE=localhost:d:\fbdata\mc_prod.fdb
++SET DATABASE=localhost:d:\fbdata\MC-09.fdb
+ SET UpdateType=1
+ ::SET LimitToUpdate=102
+ SET SourceDir=%WorkPlace%\moraviacans\sql\upgrade\
+@@ -16,7 +16,7 @@
+ 
+ :: Create upg script tepmplate
+ SET DATABASE_TARGET=%DATABASE%
+-SET DATABASE=localhost:d:\fbdata\mc.fdb
++SET DATABASE=localhost:d:\fbdata\MC-09.fdb
+ CALL ..\..\Firebird-SQL-Lib\IBReplicator\CreateUpgScript.bat %CD%\MC_Upg.sql
+ @IF %ERRORLEVEL% NEQ 0 @goto :end
+ 

@@ -287,6 +287,47 @@ class ResolveIntegrationTests(unittest.TestCase):
                          "manual property")
         self.assertNotEqual(self.status_for("properties.txt").get("props"), "conflicted")
 
+    def test_incoming_merge_properties_use_source_revision_instead_of_working_copy_base(self):
+        self.svn("propset", "custom:flag", "base property", "properties.txt")
+        self.svn("commit", "-m", "property base")
+        self.svn("update")
+        upstream = self.upstream()
+        self.run_process(["svn", "propset", "custom:flag", "incoming property",
+                          "properties.txt"], cwd=upstream)
+        self.run_process(["svn", "commit", "-m", "incoming property"], cwd=upstream)
+        self.svn("propset", "custom:flag", "local property", "properties.txt")
+        self.svn("propset", "custom:unrelated", "pending property", "properties.txt")
+        self.svn("merge", "-r", "2:3", self.repo_url, "--accept", "postpone")
+        self.assertEqual(self.svn("propget", "-r", "BASE", "custom:flag",
+                                  "properties.txt").stdout.strip(), "base property")
+
+        self.cli("resolve", "properties.txt", "--accept", "theirs-conflict", input="2\n")
+
+        self.assertEqual(self.svn("propget", "custom:flag", "properties.txt").stdout.strip(),
+                         "incoming property")
+        self.assertEqual(self.svn("propget", "custom:unrelated", "properties.txt").stdout.strip(),
+                         "pending property")
+        self.assertNotEqual(self.status_for("properties.txt").get("props"), "conflicted")
+
+    def test_incoming_properties_with_unknown_source_require_manual_resolution(self):
+        self.make_text_conflict(property_conflict=True)
+        app = GitSvn(self.wc, self.patches, self.state)
+        conflict = app.load_conflict(app.conflicted_entries()[0])
+        info = ET.fromstring(conflict.info)
+        for node in info.findall(".//conflict[@type='property']"):
+            node.set("operation", "merge")
+            for version in node.findall("version"):
+                node.remove(version)
+        conflict.info = ET.tostring(info)
+        before, state_before = self.tree_contents(self.wc), self.tree_contents(self.state)
+
+        with self.assertRaisesRegex(GitSvnError, "incoming properties"):
+            app.propose_resolution(conflict, "theirs-conflict")
+        self.assertEqual(app.propose_resolution(conflict, "mine-conflict").properties,
+                         conflict.properties)
+        self.assertEqual(self.tree_contents(self.wc), before)
+        self.assertEqual(self.tree_contents(self.state), state_before)
+
     def test_resolving_directory_properties_does_not_resolve_conflicted_children(self):
         self.write("folder/child.txt", "child base\n")
         self.svn("add", "folder")

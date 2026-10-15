@@ -1,0 +1,11 @@
+Index: moraviacans/tools/Upgrade_Local_Production.bat
+===================================================================
+--- moraviacans/tools/Upgrade_Local_Production.bat	(revision 99549)
++++ moraviacans/tools/Upgrade_Local_Production.bat	(working copy)
+@@ -1,5 +1,5 @@
+ :: Upgrade local copy of production DB to lastes posible version
+-SET DATABASE=localhost:d:\fbdata\mc_prod.fdb
++SET DATABASE=localhost:d:\fbdata\MC-09.fdb
+ 
+ call c:\fb\revert.bat %DATABASE%
+ IF %ERRORLEVEL% NEQ 0 goto :end

@@ -1,0 +1,13 @@
+Index: kingspan/tools/CustUpgrade_Local_Production_MES.bat
+===================================================================
+--- kingspan/tools/CustUpgrade_Local_Production_MES.bat	(revision 99549)
++++ kingspan/tools/CustUpgrade_Local_Production_MES.bat	(working copy)
+@@ -2,7 +2,7 @@
+ 
+ @call ..\..\tools\SetELektLabsEnvVariables.bat
+ 
+-SET DATABASE=localhost:d:\fbdata\KINGSPAN_MES_Prod.FDB
++SET DATABASE=localhost:d:\fbdata\KS-08.FDB
+ SET UpdateType=1
+ ::SET LimitToUpdate=102
+ SET SourceDir=%WorkPlace%\Kingspan\sql\upgrade\

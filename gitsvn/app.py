@@ -11,11 +11,13 @@ from .conflicts import ConflictMixin
 from .conflict_ui import ConflictUiMixin
 from .inspection import InspectionMixin
 from .models import GitSvnError
+from .restoration import FileRestoreMixin
 from .snapshots import SnapshotMixin
 from .working_copy import WorkingCopyMixin
 
 
-class GitSvn(ConflictUiMixin, ConflictMixin, InspectionMixin, BranchMixin, SnapshotMixin, WorkingCopyMixin):
+class GitSvn(FileRestoreMixin, ConflictUiMixin, ConflictMixin, InspectionMixin, BranchMixin,
+             SnapshotMixin, WorkingCopyMixin):
     def __init__(self, svn_root=None, patch_root=None, state_dir=None, config_path=None, *, _config=None):
         self.config_path = configuration_path(state_dir, config_path)
         # Init validates chosen settings before writing a new config file.

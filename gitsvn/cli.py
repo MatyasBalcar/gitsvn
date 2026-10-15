@@ -35,6 +35,9 @@ def parser():
     revert = commands.add_parser("revert", help="Choose a saved snapshot to restore")
     revert.add_argument("branch", nargs="?")
     revert.add_argument("snapshot", nargs="?", help="Snapshot ID; omit to open the snapshot picker")
+    restore = commands.add_parser("restore", help="Restore one file from the current branch's saved head")
+    restore.add_argument("path", nargs="?",
+                         help="File relative to the SVN working-copy root; omit to pick a changed file")
     commands.add_parser("pull", help="Autosave changes and run svn update")
     resolve = commands.add_parser("resolve", help="Review and resolve SVN conflicts")
     resolve.add_argument("path", nargs="?", help="Working-copy path; omit to pick a conflict")
@@ -52,7 +55,7 @@ def main(argv=None):
         if arguments.command == "init":
             return initialize(arguments)
         app = GitSvn(arguments.svn_root, arguments.patch_root, arguments.state_dir, arguments.config)
-        if (arguments.command in ("switch", "commit", "revert", "pull", "status", "add", "resolve") or
+        if (arguments.command in ("switch", "commit", "revert", "restore", "pull", "status", "add", "resolve") or
                 (arguments.command == "finalize" and not arguments.latest)):
             app.verify_working_copy()
         if arguments.command == "branch":
@@ -69,6 +72,8 @@ def main(argv=None):
             app.inspect()
         elif arguments.command == "revert":
             app.select_restore(arguments.branch or app.branch, arguments.snapshot)
+        elif arguments.command == "restore":
+            app.restore_file(arguments.path)
         elif arguments.command == "pull":
             app.pull()
         elif arguments.command == "resolve":

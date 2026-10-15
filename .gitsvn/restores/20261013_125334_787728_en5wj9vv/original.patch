@@ -1,0 +1,20 @@
+Index: kingspan/tools/Upgrade_Local_Production_MES.bat
+===================================================================
+--- kingspan/tools/Upgrade_Local_Production_MES.bat	(revision 99549)
++++ kingspan/tools/Upgrade_Local_Production_MES.bat	(working copy)
+@@ -1,5 +1,5 @@
+ :: Upgrade local copy of production DB to lastes posible version
+-SET DATABASE=localhost:d:\fbdata\KINGSPAN_MES_Prod.FDB
++SET DATABASE=localhost:d:\fbdata\KS-08.FDB
+ @SET ISC_USER=sysdba
+ @SET ISC_PASSWORD=masterkey
+ 
+@@ -8,7 +8,7 @@
+ 
+ CALL ..\..\tools\SetELektLabsEnvVariables.bat
+ 
+-call c:\fb\revert.bat d:\fbdata\KINGSPAN_MES_Prod.FDB
++call c:\fb\revert.bat d:\fbdata\KS-08.FDB
+ @IF %ERRORLEVEL% NEQ 0 goto :end
+ 
+ ECHO SET TERM ^^; > wr.sql

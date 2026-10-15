@@ -118,6 +118,7 @@ Use `gitsvn [options] <command>`:
 | `log [BRANCH]` | List saved versions with readable dates, times, messages, and snapshot IDs. Defaults to the current branch. |
 | `inspect` | Choose a changed path from the current saved version and view its patch in a read-only terminal viewer. |
 | `revert [BRANCH] [SNAPSHOT]` | Restore a saved version and select its branch. Omit the snapshot ID to open the snapshot picker; the branch defaults to the current branch. |
+| `restore [PATH]` | Restore one file to the current branch's saved head. Omit the path to pick a changed file. |
 | `finalize DESCRIPTION [TICKET]` | Save a normal commit in the ticket folder and export a named patch directly into the patch root. The ticket defaults to the current branch. |
 | `pull` | Save pending changes for recovery, then run SVN update at the working-copy root, excluding externals and postponing conflict resolution. |
 | `resolve [PATH] [--accept METHOD]` | Review an SVN conflict, preview a proposed result, and confirm before applying the resolution. Omit the path to choose a conflicted file. |
@@ -128,6 +129,8 @@ Examples:
 gitsvn switch
 gitsvn revert 12345
 gitsvn revert 12345 20261002_143000_123456
+gitsvn restore
+gitsvn restore src\Example.cs
 gitsvn finalize "Fix input validation" 12345
 gitsvn finalize SavedVersion 12345 --latest
 gitsvn pull
@@ -138,6 +141,12 @@ gitsvn resolve sql\Upgrade.sql --accept mine-conflict
 `gitsvn switch` opens a terminal menu of local branches, including `trunk`, with the current branch highlighted. Use **Up/Down** to choose and **Enter** to switch; **Esc** or **q** cancels. Long lists scroll as you move. When the terminal cannot display the menu or input/output is redirected, it shows a numbered list instead. Selecting the current branch or cancelling leaves your work and history untouched.
 
 `gitsvn revert` uses the same controls to choose a snapshot from the current branch; `gitsvn revert 12345` chooses from that branch. Each entry shows its date, time, message, and snapshot ID. The branch's **saved head** is marked and selected initially; if none is recorded, the newest snapshot is selected. Cancelling leaves your work and history untouched. After restoring, the selected snapshot becomes the branch's head, even when the recovery autosave has a newer timestamp.
+
+`gitsvn restore` opens the existing file picker with the tracked file changes shown by `status`, excluding directories. Use **Up/Down** and **Enter** to restore a file; **Esc** or **q** cancels without changing files or creating recovery copies. Redirected input/output uses the numbered picker. Unversioned, SVN-ignored, external, and `ignore-on-commit` files are excluded using the same filter as status.
+
+`gitsvn restore src\Example.cs` skips the picker and restores only that file to the current branch's **recorded saved head**, including its saved text, properties, addition, or deletion. It also recovers an ordinary tracked file deleted outside SVN. Paths are relative to the SVN working-copy root, regardless of your current directory; an absolute path within that root also works. If the saved snapshot has no changes for the file, it restores the file to SVN BASE. Other files, the current branch, its head, and commit history stay unchanged. It requires a recorded head and creates no commit, regardless of `autosave`.
+
+Before restoring, gitsvn saves the selected file's pending changes under `state_dir\restores\TIMESTAMP`. If applying the saved version fails, it restores the original selected file; if recovery also fails, the error reports the retained recovery folder. `restore` accepts files only and refuses unversioned, ignored, `ignore-on-commit`, unsafe, or unsupported paths, including unresolved conflicts, copies, replacements, and binary changes. Resolve conflicts with `gitsvn resolve` first.
 
 `log` shows local dates and times as `DD.MM.YYYY HH:MM:SS`. The snapshot ID appears in brackets after the message; use that exact ID with `revert`. The branch's saved head is marked **`(current version)`**, even when a newer recovery autosave appears above it. Dates come from generated snapshot names, or the file's last-modified time for older imported patches. Restoring an older version makes it the branch's saved head for future switches.
 
@@ -181,7 +190,7 @@ The default configuration is `.gitsvn\config.json` beside `main.py`. All setting
 | --- | --- |
 | `svn_root` | SVN working-copy root. Configure this for your checkout. |
 | `patch_root` | Folder for branch snapshots and finalized patches; defaults to `D:\Patches`. |
-| `state_dir` | Folder for local branch state and conflict recovery copies; defaults to the configuration file's directory. |
+| `state_dir` | Folder for local branch state and file restore or conflict recovery copies; defaults to the configuration file's directory. |
 | `autosave` | Save outgoing changes when switching branches; defaults to `true`. |
 
 Setting `state_dir` changes where state is stored; the configuration continues to load from the same file. Relative paths in the configuration are resolved from that file's directory. Relative command-line paths are resolved from your current directory.
@@ -233,6 +242,7 @@ Binary changes, SVN copies or moves, replacements, missing files, and unresolved
 ```powershell
 gitsvn --help
 gitsvn finalize --help
+gitsvn restore --help
 gitsvn resolve --help
 ```
 

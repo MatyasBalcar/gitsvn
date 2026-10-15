@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "entries": [
+    {
+      "path": "kingspan/tools/Upgrade_Local_Production_MES.bat",
+      "item": "modified",
+      "kind": "file",
+      "empty": false
+    }
+  ],
+  "empty_properties": {}
+}

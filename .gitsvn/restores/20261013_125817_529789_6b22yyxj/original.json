@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "entries": [
+    {
+      "path": "moraviacans/tools/Upgrade_Local_Production.bat",
+      "item": "modified",
+      "kind": "file",
+      "empty": false
+    }
+  ],
+  "empty_properties": {}
+}
