@@ -7,7 +7,7 @@ from .models import GitSvnError
 from .terminal import pick_item, terminal_text, view_diff
 
 
-def file_diff(before, after, title):
+def file_diff(before, after, title, before_label="before", after_label="proposed"):
     if b"\x00" in before or b"\x00" in after:
         return [title, f"Before: {len(before)} bytes, SHA256 {hashlib.sha256(before).hexdigest()}",
                 f"After:  {len(after)} bytes, SHA256 {hashlib.sha256(after).hexdigest()}"]
@@ -22,7 +22,7 @@ def file_diff(before, after, title):
         details.append(f"Line endings: CRLF={after_crlf}, LF={after.count(b'\n') - after_crlf} in result")
     return details + list(difflib.unified_diff(before.decode("utf-8-sig", errors="backslashreplace").splitlines(),
                                      after.decode("utf-8-sig", errors="backslashreplace").splitlines(),
-                                     fromfile=title + " (before)", tofile=title + " (proposed)",
+                                     fromfile=title + f" ({before_label})", tofile=title + f" ({after_label})",
                                      lineterm=""))
 
 

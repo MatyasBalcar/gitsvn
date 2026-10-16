@@ -31,7 +31,7 @@ def parser():
     finalize.add_argument("--latest", action="store_true", help="Export the branch's saved snapshot")
     log = commands.add_parser("log", help="List snapshot timestamps and messages")
     log.add_argument("branch", nargs="?")
-    commands.add_parser("inspect", help="Browse file diffs in the current branch's saved head")
+    commands.add_parser("inspect", help="Compare working-copy files with the current branch's saved head")
     revert = commands.add_parser("revert", help="Choose a saved snapshot to restore")
     revert.add_argument("branch", nargs="?")
     revert.add_argument("snapshot", nargs="?", help="Snapshot ID; omit to open the snapshot picker")
@@ -55,7 +55,7 @@ def main(argv=None):
         if arguments.command == "init":
             return initialize(arguments)
         app = GitSvn(arguments.svn_root, arguments.patch_root, arguments.state_dir, arguments.config)
-        if (arguments.command in ("switch", "commit", "revert", "restore", "pull", "status", "add", "resolve") or
+        if (arguments.command in ("switch", "commit", "revert", "restore", "inspect", "pull", "status", "add", "resolve") or
                 (arguments.command == "finalize" and not arguments.latest)):
             app.verify_working_copy()
         if arguments.command == "branch":

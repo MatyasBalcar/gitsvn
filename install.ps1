@@ -20,6 +20,7 @@ foreach ($gitsvnFile in @(
     'gitsvn\setup.py',
     'gitsvn\cli.py'
     'gitsvn\restoration.py'
+    'gitsvn\comparison.py'
 )) {
     if (-not (Test-Path -LiteralPath (Join-Path $gitsvnDirectory $gitsvnFile) -PathType Leaf)) {
         throw "Missing gitsvn file: $gitsvnFile"

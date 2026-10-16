@@ -47,7 +47,7 @@ class InspectIntegrationTests(unittest.TestCase):
                 return choice[1]
         self.fail(f"File is not present in the numbered menu: {path}\n{menu}")
 
-    def test_inspect_uses_recorded_head_instead_of_recovery_or_pending_edits(self):
+    def test_inspect_compares_pending_edits_with_recorded_head_instead_of_recovery(self):
         self.configure(autosave=False)
         self.new_branch()
         self.write("story.txt", "selected saved version\n")
@@ -62,21 +62,24 @@ class InspectIntegrationTests(unittest.TestCase):
         result = self.inspect_unchanged("1\nq\n")
 
         self.assertIn(selected, result.stdout)
-        self.assertIn("-original", result.stdout)
-        self.assertIn("+selected saved version", result.stdout)
+        self.assertNotIn("-original", result.stdout)
+        self.assertIn("-selected saved version", result.stdout)
+        self.assertIn("+pending working copy version", result.stdout)
         self.assertNotIn("later committed version", result.stdout)
         self.assertNotIn("recovery autosave version", result.stdout)
-        self.assertNotIn("pending working copy version", result.stdout)
 
     def test_inspect_displays_hunks_and_nearby_context_without_whole_file(self):
         original = [f"line {number:02d}" for number in range(1, 31)]
         self.write("story.txt", "\n".join(original) + "\n")
         self.svn("commit", "-m", "long base file")
         self.new_branch()
-        modified = original.copy()
+        saved = original.copy()
+        saved[4] = "saved change at line 05"
+        self.write("story.txt", "\n".join(saved) + "\n")
+        self.commit("saved baseline")
+        modified = saved.copy()
         modified[14] = "changed line 15"
         self.write("story.txt", "\n".join(modified) + "\n")
-        self.commit("middle of file")
 
         result = self.inspect_unchanged("1\nq\n")
 
@@ -87,13 +90,14 @@ class InspectIntegrationTests(unittest.TestCase):
         self.assertIn(" line 16", result.stdout)
         self.assertNotIn("line 01", result.stdout)
         self.assertNotIn("line 30", result.stdout)
+        self.assertNotIn("saved change at line 05", result.stdout)
 
     def test_property_payload_is_not_mistaken_for_another_file(self):
         self.new_branch()
+        self.commit("saved baseline")
         value = "++ value: thing\nIndex: phantom.txt\nProperty changes on: phantom.txt"
         self.svn("propset", "custom:note", value, "properties.txt")
         self.write("story.txt", "other file must stay separate\n")
-        self.commit("property and text")
         menu = self.inspect_unchanged().stdout
         choice = self.file_choice(menu, "properties.txt")
         self.assertNotIn("phantom.txt", menu)
@@ -113,20 +117,22 @@ class InspectIntegrationTests(unittest.TestCase):
         metadata = json.loads((self.patches / "18814" / f"{snapshot}.json")
                               .read_text(encoding="utf-8"))
         self.assertIn("story.txt", metadata["empty_properties"])
+        self.svn("propset", "custom:flag", "pending empty file property", "story.txt")
 
         result = self.inspect_unchanged("1\nq\n")
 
-        self.assertIn("-original", result.stdout)
+        self.assertNotIn("-original", result.stdout)
         self.assertIn("custom:flag", result.stdout)
-        self.assertIn("+empty file property", result.stdout)
-        self.assertEqual(result.stdout.count("+empty file property"), 1)
+        self.assertIn("-empty file property", result.stdout)
+        self.assertIn("+pending empty file property", result.stdout)
+        self.assertEqual(result.stdout.count("+pending empty file property"), 1)
 
     def test_inspect_lists_empty_file_and_directory_from_snapshot_metadata(self):
         self.new_branch()
+        self.commit("saved baseline")
         self.write("empty.txt", "")
         (self.wc / "emptydir").mkdir()
         self.cli("add", "empty.txt", "emptydir")
-        self.commit("empty paths")
         menu = self.inspect_unchanged().stdout
 
         for path in ("empty.txt", "emptydir"):
@@ -144,20 +150,21 @@ class InspectIntegrationTests(unittest.TestCase):
         self.new_branch()
         self.svn("delete", "tracked", "emptybase.txt")
         snapshot = self.commit("delete directory and empty file")
+        self.svn("revert", "--depth", "infinity", ".")
         menu = self.inspect_unchanged().stdout
         self.file_choice(menu, "tracked")
         self.file_choice(menu, "emptybase.txt")
         child = "tracked/nested/file.txt"
         choice = self.file_choice(menu, child)
         result = self.inspect_unchanged(f"{choice}\nq\n")
-        self.assertIn("-deleted directory content", result.stdout)
+        self.assertIn("+deleted directory content", result.stdout)
 
         # Historical snapshots may consist of only a patch/message pair.
         (self.patches / "18814" / f"{snapshot}.json").unlink()
         legacy_menu = self.inspect_unchanged().stdout
         choice = self.file_choice(legacy_menu, child)
         legacy = self.inspect_unchanged(f"{choice}\nq\n")
-        self.assertIn("-deleted directory content", legacy.stdout)
+        self.assertIn("+deleted directory content", legacy.stdout)
 
     def test_cancelling_picker_or_reaching_eof_never_changes_files(self):
         self.new_branch()
@@ -170,7 +177,7 @@ class InspectIntegrationTests(unittest.TestCase):
                 self.assertIn("story.txt", result.stdout)
                 self.assertEqual(self.read("story.txt"), "unsaved content\n")
 
-    def test_interactive_picker_viewer_and_back_use_only_saved_snapshot(self):
+    def test_interactive_picker_viewer_compares_working_copy_and_saved_head(self):
         self.new_branch()
         self.write("story.txt", "saved interactive content\n")
         snapshot = self.commit("interactive inspection")
@@ -182,10 +189,7 @@ class InspectIntegrationTests(unittest.TestCase):
         keys = iter(["\r", "q", "\x1b"])
         with patch("gitsvn.terminal.picker_input") as console, \
                 patch("gitsvn.cli.sys.stdout", output), \
-                patch("gitsvn.terminal.shutil.get_terminal_size", return_value=os.terminal_size((160, 24))), \
-                patch.object(GitSvn, "svn", side_effect=AssertionError("SVN query")), \
-                patch.object(GitSvn, "verify_working_copy",
-                             side_effect=AssertionError("SVN verification")):
+                patch("gitsvn.terminal.shutil.get_terminal_size", return_value=os.terminal_size((160, 24))):
             console.return_value.__enter__.return_value = keys.__next__
             code = main([
                 "--svn-root", str(self.wc), "--patch-root", str(self.patches),
@@ -195,11 +199,11 @@ class InspectIntegrationTests(unittest.TestCase):
         self.assertEqual(code, 0)
         rendered = output.getvalue()
         self.assertEqual(rendered.count("Inspect 18814:"), 2)
-        self.assertEqual(rendered.count("(current version)"), 2)
+        self.assertEqual(rendered.count("working copy vs saved head"), 2)
         self.assertIn(snapshot, rendered)
-        self.assertIn("-original", rendered)
-        self.assertIn("+saved interactive content", rendered)
-        self.assertNotIn("pending interactive content", rendered)
+        self.assertNotIn("-original", rendered)
+        self.assertIn("-saved interactive content", rendered)
+        self.assertIn("+pending interactive content", rendered)
         self.assertIn("\x1b[?1049h", rendered)
         self.assertIn("\x1b[?1049l", rendered)
         for name, path in (("working copy", self.wc), ("snapshots", self.patches),
@@ -212,7 +216,7 @@ class InspectIntegrationTests(unittest.TestCase):
         self.new_branch()
         self.commit("clean current version")
         clean = self.inspect_unchanged("")
-        self.assertIn("No changed files in current version.", clean.stdout)
+        self.assertIn("No changes compared with the saved head.", clean.stdout)
         self.assertNotIn("number", clean.stdout.lower())
 
         state_path = self.state / "state.json"
@@ -223,6 +227,87 @@ class InspectIntegrationTests(unittest.TestCase):
         unselected = self.inspect_unchanged("")
         self.assertIn("No saved head on branch 18814", unselected.stdout)
         self.assertNotIn("No changed files", unselected.stdout)
+
+    def test_unchanged_saved_branch_has_no_diff_even_when_changed_from_svn_base(self):
+        self.new_branch()
+        self.write("story.txt", "saved change against SVN\n")
+        self.svn("propset", "custom:flag", "saved property", "properties.txt")
+        self.commit("saved branch work")
+
+        result = self.inspect_unchanged("")
+
+        self.assertIn("No changes compared with the saved head.", result.stdout)
+        self.assertNotIn("number", result.stdout.lower())
+
+    def test_returning_file_to_svn_base_is_visible_as_change_against_saved_head(self):
+        self.new_branch()
+        self.write("story.txt", "saved change against SVN\n")
+        self.commit("saved change")
+        self.svn("revert", "story.txt")
+
+        result = self.inspect_unchanged("1\nq\n")
+
+        self.assertIn("-saved change against SVN", result.stdout)
+        self.assertIn("+original", result.stdout)
+        self.assertIn("(saved head)", result.stdout)
+        self.assertIn("(working copy)", result.stdout)
+
+    def test_native_eol_translation_does_not_create_false_changes(self):
+        self.svn("propset", "svn:eol-style", "native", "story.txt")
+        self.svn("commit", "-m", "native EOL fixture")
+        self.new_branch()
+        (self.wc / "story.txt").write_bytes(b"saved native line\r\n")
+        self.commit("saved native text")
+
+        self.assertIn("No changes compared with the saved head.", self.inspect_unchanged("").stdout)
+        (self.wc / "story.txt").write_bytes(b"pending native line\r\n")
+        result = self.inspect_unchanged("1\nq\n")
+
+        self.assertIn("-saved native line", result.stdout)
+        self.assertIn("+pending native line", result.stdout)
+
+    def test_new_unsaved_tracked_files_are_visible_and_excluded_files_stay_hidden(self):
+        self.new_branch()
+        self.write("added.txt", "pending added file\n")
+        self.svn("add", "added.txt")
+        self.write("loose.txt", "unversioned content\n")
+        self.write("ignored.txt", "private change\n")
+        self.svn("changelist", "ignore-on-commit", "ignored.txt")
+
+        result = self.inspect_unchanged("1\nq\n")
+
+        self.assertIn("+pending added file", result.stdout)
+        self.assertNotIn("loose.txt", result.stdout)
+        self.assertNotIn("ignored.txt", result.stdout)
+
+    def test_saved_text_without_final_newline_is_reconstructed_for_comparison(self):
+        self.new_branch()
+        (self.wc / "story.txt").write_bytes(b"saved without newline")
+        self.commit("no final newline")
+        self.write("story.txt", "pending with newline\n")
+
+        result = self.inspect_unchanged("1\nq\n")
+
+        self.assertIn("-saved without newline", result.stdout)
+        self.assertIn("+pending with newline", result.stdout)
+        self.assertIn("Final newline: present", result.stdout)
+
+    def test_svn_keywords_do_not_create_false_differences_or_break_saved_hunks(self):
+        self.write("story.txt", "$Id$\noriginal\n")
+        self.svn("propset", "svn:keywords", "Id", "story.txt")
+        self.svn("commit", "-m", "expanded keyword fixture")
+        self.svn("update")
+        self.new_branch()
+        self.write("story.txt", self.read("story.txt").replace("original", "saved keyword file"))
+        self.commit("saved text with expanded keyword context")
+
+        self.assertIn("No changes compared with the saved head.", self.inspect_unchanged("").stdout)
+        self.write("story.txt", self.read("story.txt").replace("saved keyword file", "pending keyword file"))
+        result = self.inspect_unchanged("1\nq\n")
+
+        self.assertIn("-saved keyword file", result.stdout)
+        self.assertIn("+pending keyword file", result.stdout)
+        self.assertNotIn("-original", result.stdout)
 
     def test_missing_or_invalid_recorded_head_fails_without_falling_back(self):
         self.new_branch()

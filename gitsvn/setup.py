@@ -65,7 +65,7 @@ def initialize(arguments):
                  "gitsvn/terminal.py", "gitsvn/working_copy.py", "gitsvn/snapshots.py",
                  "gitsvn/inspection.py", "gitsvn/branches.py", "gitsvn/app.py",
                  "gitsvn/conflicts.py", "gitsvn/conflict_ui.py", "gitsvn/merge.py",
-                 "gitsvn/setup.py", "gitsvn/cli.py", "gitsvn/restoration.py"):
+                 "gitsvn/setup.py", "gitsvn/cli.py", "gitsvn/restoration.py", "gitsvn/comparison.py"):
         if not (program_dir / name).is_file():
             raise GitSvnError(f"Missing gitsvn file: {program_dir / name}")
     for name in ("python", "svn"):
